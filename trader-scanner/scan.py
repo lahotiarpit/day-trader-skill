@@ -79,10 +79,18 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import market  # noqa: E402  (US / India profiles, same file in each clock skill)
+
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 YAHOO_HOSTS = ("https://query2.finance.yahoo.com", "https://query1.finance.yahoo.com")
 NASDAQ_FILES = ("nasdaqlisted.txt", "otherlisted.txt")
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/"
+NSE_EQUITY_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"   # --market IN
+NSE_EQUITY_FILE = "EQUITY_L.csv"
+NIFTY_URL = "https://www.niftyindices.com/IndexConstituent/%s"
+NIFTY_FILES = {"nifty50": "ind_nifty50list.csv", "nifty100": "ind_nifty100list.csv",
+               "nifty200": "ind_nifty200list.csv", "nifty500": "ind_nifty500list.csv"}
 SPARK_MAX = 20      # Yahoo's spark answers 400 above 20 symbols
 PAUSE = 0.3         # seconds between requests: be polite to free endpoints
 BACKOFF = 5.0       # seconds to wait before the one retry after a 429
@@ -91,6 +99,10 @@ BAR_MIN = 5
 MAX_CONFIRM = 200   # stage-2 v8 charts per orb scan, most traded first
 MIN_DAILY_BARS = 30
 DEFAULT_UNIVERSE = "trader/universe.txt"
+MIN_PRICE = 5.0           # daily and orb default floor (market.py: 50 rupees for IN)
+MIN_VOLUME = 1000000      # daily default (market.py: 100,000 for IN)
+NO_ENTRIES_AFTER = "15:30"
+MARKET = "US"
 NOTE = "A scan is a list of charts that match a rule, not a list of stocks to buy."
 
 NYSE_HOLIDAYS = {
@@ -273,11 +285,11 @@ def to_yahoo(sym):
 
 def spark_path(symbols, rng, interval):
     return "/v7/finance/spark?symbols=%s&range=%s&interval=%s" % (
-        ",".join(to_yahoo(s) for s in symbols), rng, interval)
+        ",".join(market.url_symbol(to_yahoo(s)) for s in symbols), rng, interval)
 
 
 def chart_path(sym, rng, interval):
-    return "/v8/finance/chart/%s?range=%s&interval=%s" % (to_yahoo(sym), rng, interval)
+    return "/v8/finance/chart/%s?range=%s&interval=%s" % (market.url_symbol(to_yahoo(sym)), rng, interval)
 
 
 # ---------------------------------------------------------------- parsing
@@ -671,9 +683,9 @@ def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
             raise ScanError("The market closed at %s ET on %s. Replay the session with --at 10:15."
                             % (clock_label(close_dt), day_label(day)))
     if cutoff < first_close:
-        raise ScanError("It is %s ET: the %d-minute opening range runs 9:30 to %s and the first bar after it "
+        raise ScanError("It is %s ET: the %d-minute opening range runs %d:%02d to %s and the first bar after it "
                         "closes at %s. Run orb again after %s."
-                        % (clock_label(cutoff), or_minutes, clock_label(range_end), clock_label(first_close),
+                        % (clock_label(cutoff), or_minutes, OPEN.hour, OPEN.minute, clock_label(range_end), clock_label(first_close),
                            clock_label(first_close)))
     if until is not None and cutoff.time() > until:
         raise ScanError("It is %s ET, after %s, your last time for new entries (no_entries_after): an "
@@ -837,7 +849,89 @@ def money(x):
 
 # ---------------------------------------------------------------- commands
 
+def parse_nse_csv(text):
+    """NSE's EQUITY_L.csv or a niftyindices.com constituent list -> (rows, counts).
+    Keeps series EQ only: BE, BZ and the rest settle trade for trade and cannot be
+    day traded."""
+    import csv
+    import io
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
+    kept, counts, seen = [], {"rows": 0}, set()
+    for row in reader:
+        row = {(k or "").strip().upper(): (v or "").strip() for k, v in row.items()}
+        sym = row.get("SYMBOL", "").upper()
+        if not sym:
+            continue
+        counts["rows"] += 1
+        series = row.get("SERIES", "EQ").upper()
+        if series != "EQ":
+            counts["series %s" % (series or "blank")] = counts.get("series %s" % (series or "blank"), 0) + 1
+            continue
+        if sym in seen:
+            continue
+        seen.add(sym)
+        kept.append((sym, row.get("NAME OF COMPANY") or row.get("COMPANY NAME") or ""))
+    counts["keep"] = len(kept)
+    return kept, counts
+
+
+def nse_by_hand(url, a):
+    """NSE's and Nifty Indices' sites often drop scripts that do not look like a browser."""
+    flags = " --index %s" % a.index if a.index else ""
+    return ("These sites often refuse scripts. Open %s in a browser, save the file into a folder "
+            "(say trader/nse) and run: scan.py universe --market IN%s --offline trader/nse" % (url, flags))
+
+
+def cmd_universe_in(a):
+    """--market IN: NSE's listed equities (EQ series), or one Nifty index with --index."""
+    t0 = time.time()
+    fname = NIFTY_FILES[a.index] if a.index else NSE_EQUITY_FILE
+    url = NIFTY_URL % fname if a.index else NSE_EQUITY_URL
+    host = url.split("/")[2]
+    if a.offline:
+        p = os.path.join(a.offline, fname)
+        if not os.path.exists(p):
+            raise ScanError("no %s in %s" % (fname, a.offline))
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    else:
+        try:
+            text = http_get(url, timeout=60)
+        except urllib.error.HTTPError as e:
+            raise ScanError("%s answered HTTP %d for %s. %s" % (host, e.code, fname, nse_by_hand(url, a)))
+        except (urllib.error.URLError, OSError) as e:
+            raise ScanError("could not reach %s (%s). %s" % (host, getattr(e, "reason", e), nse_by_hand(url, a)))
+    kept, counts = parse_nse_csv(text)
+    if not a.no_write:
+        d = os.path.dirname(a.out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.out, "w", encoding="utf-8") as fh:
+            for sym, name in kept:
+                fh.write("%s|%s\n" % (sym, name))
+    dropped = {k: v for k, v in counts.items() if k not in ("keep", "rows")}
+    what = "the %s list" % a.index.replace("nifty", "Nifty ") if a.index else "NSE's listed equities"
+    if a.json:
+        print(json.dumps({"market": "IN", "source": url, "count": len(kept), "rows": counts["rows"],
+                          "dropped": dropped, "out": None if a.no_write else a.out,
+                          "seconds": round(time.time() - t0, 1)}, indent=2))
+    else:
+        print("%s (%s): %s rows." % (what[:1].upper() + what[1:], fname, "{:,}".format(counts["rows"])))
+        print("Kept %s NSE stocks in the EQ series (Yahoo tickers get .NS added)." % "{:,}".format(len(kept)))
+        if dropped:
+            print("Dropped: " + ", ".join("%s %s" % ("{:,}".format(v), k)
+                                          for k, v in sorted(dropped.items(), key=lambda kv: -kv[1]))
+                  + " (not EQ: settled trade for trade, no intraday).")
+        if not a.no_write:
+            print("Wrote %s (one SYMBOL|Name a line)." % a.out)
+    return 0 if kept else 1
+
+
 def cmd_universe(a):
+    if MARKET == "IN":
+        return cmd_universe_in(a)
+    if a.index:
+        raise ScanError("--index is for --market IN (Nifty lists); the US universe is every listed stock")
     t0 = time.time()
     texts = {}
     for k, fname in enumerate(NASDAQ_FILES):
@@ -944,7 +1038,7 @@ def cmd_orb(a):
     now = parse_now(a.now)
     at = parse_hhmm(a.at) if a.at else None
     cfg = read_config(a.config)
-    until = parse_hhmm(a.until or cfg.get("no_entries_after") or "15:30", "--until")
+    until = parse_hhmm(a.until or cfg.get("no_entries_after") or NO_ENTRIES_AFTER, "--until")
     data = failed = None
     explicit_day = None
     offline_syms = None
@@ -995,8 +1089,8 @@ def cmd_orb(a):
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
-    print("Opening-range breakout scan, %s %s ET: %d-minute range (9:30 to %s), 5-minute bars, Yahoo."
-          % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, a.or_minutes // BAR_MIN))))
+    print("Opening-range breakout scan, %s %s ET: %d-minute range (%d:%02d to %s), 5-minute bars, Yahoo."
+          % (day_label(day), clock_label(cutoff), a.or_minutes, OPEN.hour, OPEN.minute, clock_label(slot(day, a.or_minutes // BAR_MIN))))
     print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
           % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
              (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
@@ -1028,12 +1122,15 @@ def _p(x):
 
 
 def main(argv=None):
+    argv = market.setup(globals(), argv)
     ap = argparse.ArgumentParser(description="Chart Scanner (trader-scanner): daily setups and opening-range breakouts.")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("universe", help="download Nasdaq Trader's lists -> trader/universe.txt")
+    p = sub.add_parser("universe", help="download Nasdaq Trader's lists (IN: NSE's) -> trader/universe.txt")
     p.add_argument("--out", default=DEFAULT_UNIVERSE)
-    p.add_argument("--offline", metavar="DIR", help="a folder with nasdaqlisted.txt and otherlisted.txt")
+    p.add_argument("--offline", metavar="DIR", help="a folder with nasdaqlisted.txt and otherlisted.txt "
+                   "(IN: EQUITY_L.csv or the --index file)")
+    p.add_argument("--index", choices=sorted(NIFTY_FILES), help="IN only: one Nifty index instead of all of NSE")
     p.add_argument("--no-write", action="store_true")
     p.add_argument("--pause", type=float, default=PAUSE)
     p.add_argument("--json", action="store_true")
@@ -1056,9 +1153,9 @@ def main(argv=None):
         p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("daily", help="pre-market setups from daily closes")
-    common(p, 5.0, 1000000)
+    common(p, MIN_PRICE, MIN_VOLUME)
     p = sub.add_parser("orb", help="opening-range breakouts so far today")
-    common(p, 5.0, 0)
+    common(p, MIN_PRICE, 0)
     p.add_argument("--or-minutes", type=int, default=15)
     p.add_argument("--max-confirm", type=int, default=MAX_CONFIRM,
                    help="v8 charts to fetch in stage 2, most traded first (%d; 0 = all)" % MAX_CONFIRM)

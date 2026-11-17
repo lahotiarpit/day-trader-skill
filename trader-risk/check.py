@@ -67,6 +67,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import market  # noqa: E402  (US / India profiles, same file in each clock skill)
+
 DEFAULTS = {
     "budget": None, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_usd": 4000,
     "min_order_usd": 5, "max_loss_per_trade_usd": 50, "max_daily_loss_usd": 150, "max_trades_per_day": 3,
@@ -766,6 +769,7 @@ def load_prices(pdoc):
 
 
 def main(argv=None):
+    argv = market.setup(globals(), argv)
     ap = argparse.ArgumentParser(description="Check proposed orders against your limits (trader-risk).")
     ap.add_argument("--orders", default="trader/orders.json")
     ap.add_argument("--config", default="trader/config.json")

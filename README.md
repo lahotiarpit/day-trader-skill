@@ -152,6 +152,24 @@ for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
 
+## India (NSE)
+
+The clock skills (scanner, entry, exit, Time Machine, risk, alerts) also run on
+India's National Stock Exchange: add `--market IN` to a command, or put
+`"market": "IN"` in `trader/config.json`. They switch to the NSE session (9:15
+to 15:30 IST), NSE's holidays, NSE tickers on Yahoo (`RELIANCE` becomes
+`RELIANCE.NS`), rupee labels and India day-trade times (flat by 15:10).
+
+```bash
+python3 trader-scanner/scan.py daily --market IN --symbols RELIANCE,HDFCBANK,M&M
+python3 trader-scanner/scan.py orb --market IN --at 10:00
+python3 trader-entry/entry.py check SBIN --setup orb --market IN
+```
+
+Not yet for India: the budget and risk money rules (still in dollars, no Indian
+trading costs), the news and analyst skills (SEC filings), the Pelosi tracker
+(US Congress) and the broker (Alpaca). Each skill's SKILL.md says what switches.
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does

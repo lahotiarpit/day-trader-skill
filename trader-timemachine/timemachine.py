@@ -78,6 +78,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import market  # noqa: E402  (US / India profiles, same file in each clock skill)
+
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 PAUSE = 0.5          # seconds between requests: be polite to free endpoints
 BACKOFF = 5.0        # seconds to wait once after a 429
@@ -114,6 +117,10 @@ def _nth_sunday(year, month, n):
     d = datetime.date(year, month, 1)
     d += datetime.timedelta(days=(6 - d.weekday()) % 7)
     return d + datetime.timedelta(weeks=n - 1)
+
+
+def to_yahoo(sym):
+    return sym.upper().replace(".", "-")
 
 
 def eastern_offset(utc):
@@ -187,7 +194,7 @@ def clock24(minutes):
 
 def chart_url(sym, host="query2"):
     return "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=60d&interval=5m" % (
-        host, urllib.parse.quote(sym.upper().replace(".", "-")))
+        host, market.url_symbol(to_yahoo(sym)))
 
 
 def _sleep(seconds):
@@ -686,7 +693,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     result = chart_result(text, sym)
     meta, bars, dropped = parse_bars(result, now_utc)
     msym = str(meta.get("symbol") or "").upper()
-    if msym and msym != sym.replace(".", "-"):
+    if msym and msym != to_yahoo(sym):
         raise TMError("the data is for %s but the plan is for %s" % (msym, sym))
     gran = meta.get("dataGranularity")
     if gran and gran != "5m":
@@ -910,6 +917,7 @@ def cmd_chart(a):
 
 
 def main(argv=None):
+    argv = market.setup(globals(), argv)
     ap = argparse.ArgumentParser(description="Time Machine: replay a planned day trade (trader-timemachine).")
     sub = ap.add_subparsers(dest="cmd")
 

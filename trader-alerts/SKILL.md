@@ -148,6 +148,26 @@ watched; with `add --opening-bell`, the bell rings at 9:30.
 It never places, cancels or changes an order, never claims a quote is
 live, and never predicts where a price is going.
 
+## India (NSE)
+
+Add `--market IN` to any command (or set `"market": "IN"` in `trader/config.json`,
+or `TRADER_MARKET=IN` in the environment). The clock, the calendar and the
+defaults switch to the National Stock Exchange; `market.py` in this folder holds
+them, and the same file sits in every skill that reads the clock.
+
+- Session 9:15 to 15:30 IST (UTC+5:30, no daylight saving). The 15-minute
+  opening range is 9:15 to 9:30.
+- NSE's 2026 trading holidays (circular NSE/FAOP/71777 plus the Jan 15
+  addition). NSE publishes 2027's each December: until `market.py` has it,
+  every 2027 weekday counts as open. No half days; the Diwali Muhurat session
+  is not modelled.
+- Defaults: no new entries before 9:30 or after 14:45, flat by 15:10 (brokers
+  square off intraday positions from about 15:15).
+- Tickers: type the NSE symbol (`RELIANCE`, `M&M`); the tools ask Yahoo for
+  `RELIANCE.NS`. `.BO` (BSE) and indices like `^NSEI` pass through.
+- Times print as IST, prices in rupees. Files keep plain numbers.
+- Quotes come from Yahoo only: the Stooq fallback is US only.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
