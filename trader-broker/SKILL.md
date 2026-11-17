@@ -156,7 +156,10 @@ Zerodha publishes its own MCP server: github.com/zerodha/kite-mcp-server (read
   `place_order` is not in its tool list, it can read but not trade. Use the
   self-hosted one to place orders.
 - **Self-hosted**, with the user's own Kite Connect app (developers.kite.trade):
-  install Go, then `git clone https://github.com/zerodha/kite-mcp-server`,
+  set the app's Redirect URL to `http://localhost:8080/callback` (the server's
+  only login route, on its default port; even in stdio mode it listens there for
+  the login), install Go 1.24.2 or later (its go.mod; there are no prebuilt
+  binaries), then `git clone https://github.com/zerodha/kite-mcp-server`,
   `cd kite-mcp-server`, `go build -o kite-mcp-server`. In Claude Desktop,
   Settings > Developer > Edit Config, add the block in
   `kite_mcp_config.example.json` here, with the full path to the binary, and the
