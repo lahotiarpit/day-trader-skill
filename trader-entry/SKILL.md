@@ -174,6 +174,12 @@ It reads data and never places an order.
 - On screen, "Yahoo" reads "Zerodha Kite". A failed login or an expired session
   is one plain line that says to log in again.
 
+## Breakdowns (--side sell)
+
+`--side sell` watches the other way: the first completed bar to close BELOW the opening-range
+low (or below `--level`). It is a signal only. For an index (`^NSEI`, `^NSEBANK`) trader-exit
+turns it into a put (`exit.py option`); this pack never sells a stock short.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

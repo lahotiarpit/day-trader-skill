@@ -140,6 +140,16 @@ needs prices (`--prices trader/prices.json`). These are plain buys with no stop:
 `require_stop` is true and counts each one against `max_trades_per_day`. Use
 a separate config (`--config`) for a long-term split.
 
+## Options (size.py --option)
+
+`size.py --option` sizes `trader/option_plan.json` (from `exit.py option`) in whole lots:
+the fewest of your max loss / (entry - stop) x lot size, `max_lots` (default 2), the position
+cap, `max_order_usd` and cash. It writes ONE limit buy for those lots to `trader/orders.json`
+with an `option` block (expiry, strike, lot size, tick) and the plan; the stop goes in after
+the fill (`ticket.py protect`). Options must be on (`"allow_options": true`, your decision), and
+it only buys. Amounts are rupees. A NIFTY lot is 65 units, so one at-the-money weekly lot is
+often ₹6,000 to ₹8,000: set `max_order_usd` to match, or every lot is refused.
+
 ## Rules
 
 - Proposals only. This skill never calls a broker tool.

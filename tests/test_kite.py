@@ -309,7 +309,11 @@ class ZerodhaTickets(unittest.TestCase):
         CHECK.market.apply(vars(CHECK), "US")
 
     def test_kite_place_order_arguments(self):
-        k = TICKET.kite_input(BRACKET, ZERODHA)
+        k = TICKET.kite_input(BRACKET, ZERODHA)        # the hosted connector: orders, mode place
+        self.assertEqual(k, {"mode": "place", "variety": "regular", "exchange": "NSE", "tradingsymbol": "RELIANCE",
+                             "transaction_type": "BUY", "quantity": 44, "product": "MIS", "order_type": "MARKET",
+                             "validity": "DAY", "tag": "daytraderskill", "market_protection": -1})
+        k = TICKET.kite_input(BRACKET, dict(ZERODHA, kite_tool="place_order"))     # self-hosted
         self.assertEqual(k, {"variety": "regular", "exchange": "NSE", "tradingsymbol": "RELIANCE",
                              "transaction_type": "BUY", "quantity": 44, "product": "MIS", "order_type": "MARKET",
                              "validity": "DAY", "tag": "daytraderskill"})

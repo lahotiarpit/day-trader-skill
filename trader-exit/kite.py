@@ -376,6 +376,110 @@ def yahoo_get(path, now=None):
     raise KiteError("this tool does not know how to answer %s from Kite" % u.path)
 
 
+# ---------------------------------------------------------------- options (NFO): read only
+
+# Yahoo index ticker -> the name Zerodha's NFO list gives its options
+UNDERLYINGS = {"^NSEI": "NIFTY", "^NSEBANK": "BANKNIFTY", "^CNXFIN": "FINNIFTY", "^NSEMDCP50": "MIDCPNIFTY"}
+EXPIRY_SWITCH = "13:30"     # on expiry day, after this time use the next expiry
+
+
+def option_root(ysym):
+    """^NSEI -> NIFTY; RELIANCE.NS or RELIANCE -> RELIANCE (stock options)."""
+    s = urllib.parse.unquote(str(ysym)).strip().upper()
+    if s in UNDERLYINGS:
+        return UNDERLYINGS[s]
+    if s.startswith("^"):
+        raise KiteError("no options mapped for the index %s (known: %s)" % (s, ", ".join(sorted(UNDERLYINGS))))
+    return split_symbol(s)[1]
+
+
+def parse_options(text, root, exchange="NFO"):
+    """Zerodha's NFO instruments CSV -> option rows of one underlying."""
+    out = []
+    for row in csv.DictReader(io.StringIO(text)):
+        if row.get("exchange") != exchange or (row.get("name") or "").upper() != root:
+            continue
+        if row.get("instrument_type") not in ("CE", "PE"):
+            continue
+        try:
+            out.append({"tradingsymbol": row["tradingsymbol"], "exchange": exchange, "name": root,
+                        "expiry": row["expiry"], "strike": float(row["strike"]), "type": row["instrument_type"],
+                        "lot_size": int(float(row["lot_size"])), "tick_size": float(row["tick_size"]),
+                        "instrument_token": int(row["instrument_token"])})
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+_CHAINS = {}
+
+
+def option_chain(root, exchange="NFO", today=None):
+    """Every live option of `root`, from the day's instruments list (cached in trader/)."""
+    key = (exchange, root)
+    if key not in _CHAINS:
+        path = INSTRUMENTS_FILE % exchange
+        day = (today or now_ist().date()).isoformat()
+        text = None
+        try:
+            if datetime.datetime.fromtimestamp(os.path.getmtime(path), IST).date().isoformat() == day:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+        except OSError:
+            pass
+        if text is None:
+            text = get("/instruments/%s" % exchange, raw=True)
+            try:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            except OSError:
+                pass
+        _CHAINS[key] = parse_options(text, root, exchange)
+    if not _CHAINS[key]:
+        raise NoData("Zerodha lists no %s options for %s" % (exchange, root))
+    return _CHAINS[key]
+
+
+def pick_expiry(chain, now, switch=EXPIRY_SWITCH):
+    """The nearest expiry; on expiry day itself, the next one once it is `switch` (13:30) or later."""
+    day = now.date().isoformat()
+    cut = datetime.datetime.strptime(switch, "%H:%M").time()
+    dates = sorted({r["expiry"] for r in chain if r["expiry"] >= day})
+    if not dates:
+        raise NoData("no %s option expiry on or after %s" % (chain[0]["name"] if chain else "?", day))
+    if dates[0] == day and now.time() >= cut:
+        if len(dates) < 2:
+            raise NoData("it is past %s on expiry day and Zerodha lists no later expiry yet" % switch)
+        return dates[1], "today's expiry is past %s, so the next one" % switch
+    return dates[0], ("expires today" if dates[0] == day else "the nearest expiry")
+
+
+def pick_strike(chain, expiry, kind, spot, moneyness="atm"):
+    """ATM: the strike nearest the index (a tie goes in the money). itm1/otm1: one strike away."""
+    rows = sorted((r for r in chain if r["expiry"] == expiry and r["type"] == kind), key=lambda r: r["strike"])
+    if not rows:
+        raise NoData("no %s %s options for %s" % (chain[0]["name"] if chain else "?", kind, expiry))
+    strikes = [r["strike"] for r in rows]
+
+    def tie_key(i):
+        k = strikes[i]
+        itm = k <= spot if kind == "CE" else k >= spot
+        return (abs(k - spot), 0 if itm else 1)
+    i = min(range(len(strikes)), key=tie_key)
+    shift = {"atm": 0, "itm1": -1 if kind == "CE" else 1, "otm1": 1 if kind == "CE" else -1}.get(moneyness)
+    if shift is None:
+        raise KiteError("strike choice is atm, itm1 or otm1, not %r" % moneyness)
+    i = max(0, min(len(rows) - 1, i + shift))
+    return rows[i]
+
+
+def ltp(instruments):
+    """{"NFO:NIFTY26N2425400CE": last price, ...} from Kite's LTP quote."""
+    data = get("/quote/ltp", {"i": list(instruments)}) or {}
+    return {k: (v or {}).get("last_price") for k, v in data.items()}
+
+
 # ---------------------------------------------------------------- login
 
 def request_token_from(text):

@@ -200,6 +200,26 @@ stock's tick size; a rejected stop means no stop, so check `get_orders` after
 every placement. Run every ticket.py command with `--market IN` (or have
 `"market": "IN"` in the config) so dates and times are India's.
 
+## Zerodha options and the Kite connector
+
+**Which tool.** Zerodha's hosted Kite connector (claude.ai connector "Kite") has one `orders` tool
+(`mode: place`) and shows its own approval form for every order: a third yes, on Zerodha's side.
+That is the default (`"kite_tool": "orders"`); tickets for it carry `"mode": "place"` and, on a
+MARKET or SL-M order, `"market_protection": -1` (automatic). `"kite_tool": "place_order"` is for
+the self-hosted server in Setup C. If the approval page offers to allow future orders, leave it
+off: that would skip the per-order check.
+
+**Options** (`exit.py option`, `size.py --option`): the ticket is a LIMIT buy of whole lots on NFO
+(`kite_product` NRML or MIS). Then:
+
+1. The moment it fills: `ticket.py result ... --filled-qty Q --filled-price P`, then
+   `ticket.py protect --symbol SYM`. For an option that is a stop-limit (SL): trigger at the
+   plan's stop, limit `option_stop_limit_pct` (5%) under it, on the price step. Zerodha takes no
+   SL-M on options. In a fast fall a stop-limit can be skipped: say so.
+2. The index stop and target are exits too: trader-alerts watches the index; when either rings,
+   `ticket.py flatten --symbol SYM` (it keeps the NFO details), cancel the SL first, then sell.
+3. NRML is not squared off by Zerodha: be out by the flat-by (15:00 on expiry day).
+
 ## Steps: the entry
 
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT

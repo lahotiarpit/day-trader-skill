@@ -8,10 +8,14 @@ description: >-
   cent, and sets the target at 2R (or 1R, or your price). Refuses a stop at or
   above the entry, a target at or below it, or a stop too tight to survive the
   spread, and says why. Writes trader/plan.json for the Time Machine, the
-  Budget Manager and Price Alerts. Long side only. Use when the user says
-  "where's my stop", "set my stop and target", "plan the exit", "when do I get
-  out", "stop loss", "what's my R", "risk reward", or right after
-  /trader-entry triggers, before /trader-timemachine.
+  Budget Manager and Price Alerts. Long side; a breakdown's mirror levels for
+  an index put. On NSE, `exit.py option` turns a NIFTY / BANKNIFTY plan into
+  one option to buy: a call on a breakout, a put on a breakdown, ATM strike,
+  nearest expiry (the next after 13:30 on expiry day), stop 30% under the
+  price paid, 2R target. Use when the user says "where's my stop", "set my
+  stop and target", "plan the exit", "when do I get out", "stop loss", "what's
+  my R", "risk reward", "which NIFTY option", "call or put", "option trade",
+  or right after /trader-entry triggers, before /trader-timemachine.
 argument-hint: "[--stop or-mid|or-low|price:X|pct:X|atr:K] [--target 2R|1R|price:X]"
 ---
 
@@ -161,6 +165,36 @@ It reads data and never places an order.
   the whole NSE list is slow: scan a Nifty index or a watchlist instead.
 - On screen, "Yahoo" reads "Zerodha Kite". A failed login or an expired session
   is one plain line that says to log in again.
+
+## Options on NSE (exit.py option)
+
+The pack reads the **index** for the signal and buys **one option** for the trade. It only buys
+calls and puts; it never sells or writes an option. Options can lose everything you pay.
+
+1. `entry.py check ^NSEI --market IN --data kite` (breakout) or `--side sell` (breakdown).
+2. `exit.py plan --from trader/entry.json --write`: the index's stop and target.
+3. `timemachine.py run`: the odds of that index setup (breakdowns too).
+4. `exit.py option --write`: the contract. A breakout buys a call (CE), a breakdown a put
+   (PE); the strike nearest the index (`--strike atm`, or `itm1` / `otm1`); the nearest expiry,
+   or the next one from 13:30 on expiry day. Entry at Zerodha's last price, stop 30% under it
+   (`--stop-pct`), target 2R, all on the option's price step. It also keeps the index stop and
+   target: out at whichever comes first.
+5. `size.py --option --write`: whole lots that fit your max loss, `max_lots` (default 2), cash and
+   max order. Too much risk for one lot is a refusal that names the stop % that would fit.
+6. `check.py`, then `ticket.py show`, your yes, Kite's approval. After the fill, `ticket.py protect`
+   puts the stop in as a stop-limit (SL) order: Zerodha takes no SL-M on options.
+
+`exit.py plan --side sell` (or an entry.json from `entry.py --side sell`) gives a breakdown's
+levels: the stop over the entry (the range midpoint, rounded up), the target under it. That is
+for a put on the index; this pack never sells a stock short.
+
+Without kite.py (no Kite login on this computer), give the contract yourself:
+`exit.py option --contract NIFTY26N2325250PE --expiry 2026-11-23 --strike-price 25250
+--lot-size 65 --premium 112.35`. In a chat with the Kite connector, Claude can read those from
+its option chain and quote.
+
+Config: `option_stop_pct` (30), `option_target` ("2R"), `option_expiry_switch` ("13:30"),
+`option_flat_by` on expiry day ("15:00").
 
 ## Safety
 
