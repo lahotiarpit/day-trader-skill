@@ -389,5 +389,17 @@ class ZerodhaTickets(unittest.TestCase):
         self.assertEqual((reasons, warns), ([], []))
 
 
+class TimeMachineSymbols(unittest.TestCase):
+    def test_index_and_ampersand_symbols_are_accepted(self):
+        tm = MODS["timemachine"]
+        for sym in ("^NSEI", "M&M", "GVT&D", "3MINDIA", "RELIANCE.NS", "TSLA", "BRK.B"):
+            try:
+                tm.normalize_plan({"symbol": sym, "entry": 100, "stop": 99, "target": 102})
+            except tm.TMError as e:
+                self.assertNotIn("needs a ticker symbol", str(e), sym)
+        with self.assertRaises(tm.TMError):
+            tm.normalize_plan({"symbol": "BTC/USD", "entry": 100, "stop": 99, "target": 102})
+
+
 if __name__ == "__main__":
     unittest.main()
