@@ -264,9 +264,20 @@ def _sleep(seconds):
     time.sleep(seconds)
 
 
+def kite_get(path):
+    """--data kite: the same Yahoo path, answered from Zerodha by kite.py (same folder)."""
+    import kite
+    try:
+        return kite.yahoo_get(path)
+    except kite.KiteError as e:
+        raise EntryError(str(e))
+
+
 def yahoo_get(path):
     """GET a Yahoo path: query2 first, query1 when query2 answers 429 or 5xx.
     An HTTP 429 gets one retry on the same host after BACKOFF seconds."""
+    if market.DATA == "kite":
+        return kite_get(path)
     last = "no answer"
     for host in HOSTS:
         url = "https://%s.finance.yahoo.com%s" % (host, path)

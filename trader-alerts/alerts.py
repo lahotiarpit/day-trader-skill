@@ -254,7 +254,7 @@ def parse_yahoo(text, sym):
     return {"symbol": sym.upper(), "price": float(price), "open": opens[0] if opens else None,
             "high": m.get("regularMarketDayHigh"), "low": m.get("regularMarketDayLow"),
             "prev_close": m.get("previousClose") or m.get("chartPreviousClose"), "time": when,
-            "currency": m.get("currency"), "source": "yahoo"}
+            "currency": m.get("currency"), "source": m.get("source") or "yahoo"}
 
 
 _urlopen = urllib.request.urlopen   # tests swap these two
@@ -289,9 +289,20 @@ def fetch(url, timeout=20):
     return text
 
 
+def kite_get(path):
+    """--data kite: the same Yahoo path, answered from Zerodha by kite.py (same folder)."""
+    import kite
+    try:
+        return kite.yahoo_get(path)
+    except kite.KiteError as e:
+        raise AlertError(str(e))
+
+
 def fetch_yahoo(sym, timeout=20):
     """query2 first. A 429 waits BACKOFF seconds and tries once more; a 429 or a 5xx
     after that moves on to query1. A 404 comes back as Yahoo's own error JSON."""
+    if market.DATA == "kite":
+        return kite_get("/v8/finance/chart/%s?range=5d&interval=1d" % market.url_symbol(to_yahoo(sym)))
     last = None
     for host in YAHOO_HOSTS:
         url = yahoo_url(sym, host)

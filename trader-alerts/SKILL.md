@@ -168,6 +168,29 @@ them, and the same file sits in every skill that reads the clock.
 - Times print as IST, prices in rupees. Files keep plain numbers.
 - Quotes come from Yahoo only: the Stooq fallback is US only.
 
+### Zerodha Kite data (--data kite)
+
+With `--market IN`, add `--data kite` (or `TRADER_DATA=kite`, or `"data": "kite"`
+in `trader/config.json`) to read bars from Zerodha's Kite Connect API instead of
+Yahoo. `kite.py` in this folder answers the same Yahoo requests with Kite's
+candles, so every rule and number works the same way; only the source changes.
+It reads data and never places an order.
+
+- Needs the user's own Kite Connect app (developers.kite.trade) on the paid
+  Connect plan: the free Personal plan has no market data.
+- `KITE_API_KEY` and `KITE_API_SECRET` go in the environment on the user's own
+  computer (shell profile, or `"env"` in Claude Code's settings.json). Never in
+  the chat, never in a file in the repo.
+- One browser login a day (Zerodha ends sessions at 6:00 AM IST):
+  `python3 kite.py login`, log in, then
+  `python3 kite.py session "<the URL Zerodha sends you back to>"`. That saves
+  `trader/kite_session.json`, readable by the user only. `kite.py status` and
+  `kite.py check RELIANCE` test it.
+- Kite allows about 3 candle requests a second, one symbol each, so a scan of
+  the whole NSE list is slow: scan a Nifty index or a watchlist instead.
+- On screen, "Yahoo" reads "Zerodha Kite". A failed login or an expired session
+  is one plain line that says to log in again.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

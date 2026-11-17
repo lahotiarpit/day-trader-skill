@@ -244,9 +244,20 @@ def http_get(url, timeout=20):
         return r.read().decode("utf-8", "replace")
 
 
+def kite_get(path):
+    """--data kite: the same Yahoo path, answered from Zerodha by kite.py (same folder)."""
+    import kite
+    try:
+        return kite.yahoo_get(path)
+    except kite.KiteError as e:
+        raise ScanError(str(e))
+
+
 def yahoo_get(path):
     """GET a Yahoo Finance path. query2 first, query1 on a 429 or 5xx, and one
     more round after BACKOFF seconds if a 429 was seen. 4xx other than 429 is final."""
+    if market.DATA == "kite":
+        return kite_get(path)
     last = "no answer"
     for attempt in (0, 1):
         saw_429 = False
@@ -703,7 +714,7 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
     Returns (hits, counts, failed {sym: why})."""
     n_range = or_minutes // BAR_MIN
     counts = {"requested": len(symbols), "fetched": 0, "unusable": 0, "illiquid": 0, "scanned": 0,
-              "candidates": 0, "confirmed": 0, "unconfirmed": 0}
+              "candidates": 0, "confirmed": 0, "unconfirmed": 0, "spark_gaps": 0}
     hits, failed, cands = [], {}, []
     for sym in symbols:
         s = stage1.get(sym)
@@ -711,15 +722,22 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
             continue
         counts["fetched"] += 1
         bars = session_bars(s, day, cutoff)
+        gappy = False
         if not usable(bars, day, cutoff, n_range):
-            counts["unusable"] += 1
-            continue
+            # Yahoo's spark drops random NSE 5-minute bars that its v8 chart has
+            # (RELIANCE, TCS, INFY on 2026-11-17). On NSE a spark gap is not a halt:
+            # send the chart to stage 2, where the v8 chart must still be complete.
+            if not (MARKET == "IN" and confirm is not None and bars):
+                counts["unusable"] += 1
+                continue
+            gappy = True
+            counts["spark_gaps"] += 1
         vol = sum(b["v"] for b in bars) if s.get("v") else (s.get("meta") or {}).get("regularMarketVolume") or 0
         if bars[-1]["c"] < min_price or vol < min_volume:
             counts["illiquid"] += 1
             continue
         counts["scanned"] += 1
-        if orb_candidate(bars, n_range):
+        if gappy or orb_candidate(bars, n_range):
             cands.append((sym, bars, bars[-1]["c"] * vol))
     counts["candidates"] = len(cands)
     if confirm is not None and max_confirm and len(cands) > max_confirm:
@@ -1097,6 +1115,9 @@ def cmd_orb(a):
              "{:,}".format(counts["scanned"]),
              (" (%s under the price / volume floor)" % "{:,}".format(counts["illiquid"])) if counts["illiquid"] else "",
              "{:,}".format(counts["candidates"]), "{:,}".format(counts["confirmed"])))
+    if counts["spark_gaps"]:
+        print("%s of those had gaps in Yahoo's quick spark feed, so each was checked on its full chart instead."
+              % "{:,}".format(counts["spark_gaps"]))
     if counts["unconfirmed"]:
         print("PARTIAL: %s more candidates were not checked (only the %s most traded are; --max-confirm 0 "
               "checks all)." % ("{:,}".format(counts["unconfirmed"]), "{:,}".format(a.max_confirm)))

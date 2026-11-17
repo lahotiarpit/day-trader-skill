@@ -11,6 +11,9 @@ Pick the market, first match wins:
     "market": "IN"         in trader/config.json
     US                     otherwise
 
+and where the bars come from: --data kite (TRADER_DATA=kite, "data": "kite")
+reads Zerodha Kite Connect through kite.py instead of Yahoo. IN only.
+
 US is whatever the tool already defines: this file never changes US behaviour.
 IN swaps in the NSE session (9:15 to 15:30 IST, UTC+5:30, no daylight saving),
 the NSE holiday list, India day-trade defaults, Yahoo's .NS tickers and rupee
@@ -109,13 +112,53 @@ def pop_market_flag(argv):
     return code, out
 
 
-def config_market(path=DEFAULT_CONFIG):
+def config_market(path=DEFAULT_CONFIG, key="market"):
     try:
         with open(path, encoding="utf-8") as fh:
             cfg = json.load(fh)
     except (OSError, ValueError):
         return None
-    return cfg.get("market") if isinstance(cfg, dict) else None
+    return cfg.get(key) if isinstance(cfg, dict) else None
+
+
+# Where the bars come from, first match wins: --data kite, TRADER_DATA=kite,
+# "data": "kite" in trader/config.json, else yahoo. Kite (Zerodha) serves NSE and
+# BSE only, so it needs the IN market; kite.py in the same folder does the work.
+DATA_SOURCES = ("yahoo", "kite")
+DATA = "yahoo"
+
+
+def pop_data_flag(argv):
+    """-> (source or None, argv without --data X / --data=X)."""
+    out, src, i = [], None, 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--data":
+            if i + 1 >= len(argv):
+                raise MarketError("--data wants yahoo or kite")
+            src = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--data="):
+            src = arg.split("=", 1)[1]
+        else:
+            out.append(arg)
+        i += 1
+    return src, out
+
+
+def resolve_data(cli=None, code="US", config_path=DEFAULT_CONFIG):
+    src = cli or os.environ.get("TRADER_DATA") or config_market(config_path, "data") or "yahoo"
+    src = str(src).strip().lower()
+    if src in ("zerodha", "kiteconnect"):
+        src = "kite"
+    if src not in DATA_SOURCES:
+        raise MarketError("unknown data source %r: use yahoo or kite" % src)
+    if src == "kite" and code != "IN":
+        if not cli:
+            return "yahoo"      # a standing kite setting does not break US runs
+        raise MarketError("--data kite is Zerodha, which serves NSE and BSE only: add --market IN")
+    return src
 
 
 def resolve(cli=None, config_path=DEFAULT_CONFIG):
@@ -132,11 +175,14 @@ def resolve(cli=None, config_path=DEFAULT_CONFIG):
 
 def setup(g, argv=None):
     """Call first thing in a tool's main(). Picks the market, applies it to the
-    tool's globals and returns argv without the --market flag."""
+    tool's globals and returns argv without the --market and --data flags."""
+    global DATA
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         cli, argv = pop_market_flag(argv)
+        dcli, argv = pop_data_flag(argv)
         code = resolve(cli)
+        DATA = resolve_data(dcli, code)
     except MarketError as e:
         print("%s: %s" % (os.path.basename(g.get("__file__", "tool")), e), file=sys.stderr)
         raise SystemExit(2)
@@ -226,9 +272,20 @@ _RULES = (
 )
 
 
+_KITE_RULES = (
+    (re.compile(r"Yahoo, free, can lag"), "Zerodha Kite"),
+    (re.compile(r"Yahoo spark, "), "Zerodha Kite, "),
+    (re.compile(r"Yahoo's quick spark feed"), "the quick pass"),
+    (re.compile(r"Yahoo"), "Zerodha Kite"),
+)
+
+
 def relabel_text(text):
     for rx, new in _RULES:
         text = rx.sub(new, text)
+    if DATA == "kite":
+        for rx, new in _KITE_RULES:
+            text = rx.sub(new, text)
     return text
 
 

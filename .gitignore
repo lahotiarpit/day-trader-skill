@@ -1,0 +1,6 @@
+# Runtime data the tools write (config, watchlist, plans, orders)
+trader/
+
+# Python bytecode
+__pycache__/
+*.pyc

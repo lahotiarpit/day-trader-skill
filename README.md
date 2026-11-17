@@ -166,9 +166,22 @@ python3 trader-scanner/scan.py orb --market IN --at 10:00
 python3 trader-entry/entry.py check SBIN --setup orb --market IN
 ```
 
-Not yet for India: the budget and risk money rules (still in dollars, no Indian
-trading costs), the news and analyst skills (SEC filings), the Pelosi tracker
-(US Congress) and the broker (Alpaca). Each skill's SKILL.md says what switches.
+### Zerodha
+
+- **Data:** add `--data kite` to read bars from your own Zerodha Kite Connect
+  app instead of Yahoo (paid Connect plan, one browser login a day:
+  `python3 trader-entry/kite.py login`). Your keys live in your environment,
+  never in the chat.
+- **Orders:** set `"broker": "zerodha"` and trader-broker shows each ticket as
+  the exact `place_order` call for Zerodha's Kite MCP server, behind the same
+  three gates. Zerodha has no paper account and no bracket orders for stocks:
+  every ticket says real money, the stop-loss goes in as its own order right
+  after the entry fills (`ticket.py protect`), and the target is watched by
+  trader-alerts. See trader-broker's SKILL.md, Setup C.
+
+Not yet for India: the budget and risk money rules (amounts are plain numbers,
+with no Indian trading costs), the news and analyst skills (SEC filings) and the
+Pelosi tracker (US Congress). Each skill's SKILL.md says what switches.
 
 ## Fine print
 
