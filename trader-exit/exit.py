@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exit Planner for trader-exit: sets the stop and the target BEFORE you
-enter, so you know when to get out. Standard library only. Long side only.
+enter, so you know when to get out. Standard library only. Long side, or with --side sell the mirror
+for a breakdown (an index put; this pack never sells short).
 It never places an order.
 
     python3 exit.py plan                                    # from trader/entry.json: or-mid stop, 2R target
@@ -51,7 +52,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import market  # noqa: E402  (US / India profiles, same file in each clock skill)
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 BACKOFF = 5.0
@@ -271,8 +272,12 @@ def r_label(r):
 
 
 def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=None, or_low=None,
-            atr=None, atr_bars=None):
-    """The stop, the target and the risk, in exact cents. Raises PlanError with the reason."""
+            atr=None, atr_bars=None, side="buy"):
+    """The stop, the target and the risk, in exact cents. Raises PlanError with the reason.
+    side "sell" is the mirror (a breakdown: stop above, target below). This pack never
+    sells short: trader-exit option turns an index breakdown into a put."""
+    down = side == "sell"
+    sign = -1 if down else 1                 # +1: the stop is under the entry
     e = cents(entry)
     if e <= 0:
         raise PlanError("the entry price must be above $0")
@@ -287,56 +292,64 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
             raw = (oh + ol) / 2
             label = "opening-range midpoint"
             detail = "(%s + %s) / 2 = $%s" % (money(oh), money(ol), num(raw))
+        elif down:                           # the far side of the range, for a breakdown its high
+            raw, label = oh, "opening-range high"
         else:
             raw, label = ol, "opening-range low"
     elif stop_rule == "price":
         raw, label = stop_param, "your price"
     elif stop_rule == "pct":
-        raw = e * (1 - stop_param / 100)
-        label = "%s%% under the entry" % num(stop_param)
-        detail = "%s x (1 - %s%%) = $%s" % (money(e), num(stop_param), num(raw))
+        raw = e * (1 - sign * stop_param / 100)
+        label = "%s%% %s the entry" % (num(stop_param), "over" if down else "under")
+        detail = "%s x (1 %s %s%%) = $%s" % (money(e), "+" if down else "-", num(stop_param), num(raw))
     elif stop_rule == "atr":
         if atr is None:
             raise PlanError("an atr stop needs the session's bars")
         a = D(round(atr, 6))
-        raw = e - stop_param * a
-        label = "%s x ATR(%d) under the entry" % (num(stop_param), atr_bars)
+        raw = e - sign * stop_param * a
+        label = "%s x ATR(%d) %s the entry" % (num(stop_param), atr_bars, "over" if down else "under")
         detail = "ATR $%s over the %d bars to the entry%s" % (
             num(a.quantize(Decimal("0.0001"))), atr_bars, " (fewer than 14 so far)" if atr_bars < ATR_BARS else "")
     else:
         raise PlanError("unknown stop rule %r" % stop_rule)
-    stop = floor_cents(raw)
+    stop = D(raw).quantize(CENT, rounding=ROUND_CEILING) if down else floor_cents(raw)
     if stop != D(raw):
-        detail = (detail + ", rounded down" if detail else "$%s rounded down" % num(raw))
-    if stop >= e:
+        word = "rounded up" if down else "rounded down"
+        detail = (detail + ", " + word if detail else "$%s %s" % (num(raw), word))
+    if not down and stop >= e:
         raise PlanError("the stop %s (%s) is at or above the entry %s: a long's stop goes under the entry"
+                        % (money(stop), label, money(e)))
+    if down and stop <= e:
+        raise PlanError("the stop %s (%s) is at or below the entry %s: a breakdown's stop goes over the entry"
                         % (money(stop), label, money(e)))
     if stop <= 0:
         raise PlanError("the stop works out to %s: pick a stop above $0" % money(stop))
-    risk = e - stop
+    risk = (e - stop) * sign
     floor_risk = e * MIN_RISK_PCT / 100
     if risk < floor_risk:
-        raise PlanError("the stop is %s under the entry, less than 0.05%% of the price (%s on %s): too tight to "
+        raise PlanError("the stop is %s %s the entry, less than 0.05%% of the price (%s on %s): too tight to "
                         "survive the spread, normal wiggle would stop you out. Widen it."
-                        % (money(risk), money(floor_risk.quantize(CENT, rounding=ROUND_HALF_UP)), money(e)))
+                        % (money(risk), "over" if down else "under",
+                           money(floor_risk.quantize(CENT, rounding=ROUND_HALF_UP)), money(e)))
     if target_rule == "r":
-        target = cents(e + target_param * risk)
+        target = cents(e + sign * target_param * risk)
         t_label = r_label(target_param)
     else:
         target = cents(target_param)
         t_label = None
-    if target <= e:
+    if not down and target <= e:
         raise PlanError("the target %s is at or below the entry %s: a long's target goes above it"
                         % (money(target), money(e)))
-    rr = ((target - e) / risk).quantize(CENT, rounding=ROUND_HALF_UP)
+    if down and (target >= e or target <= 0):
+        raise PlanError("the target %s is at or above the entry %s: a breakdown's target goes below it"
+                        % (money(target), money(e)))
+    rr = ((target - e) * sign / risk).quantize(CENT, rounding=ROUND_HALF_UP)
     if t_label is None:
         t_label = "your price (%sR)" % ratio(rr)
     return {"entry": e, "stop": stop, "stop_label": label, "stop_detail": detail, "target": target,
             "target_r": target_param if target_rule == "r" else rr, "target_label": t_label,
             "risk": risk, "reward_risk": rr}
 
-
-# ---------------------------------------------------------------- bars for ATR (same reader as trader-entry)
 
 def _open_url(url, timeout=20):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
@@ -546,8 +559,7 @@ def gather(a):
     """The entry facts, from trader/entry.json or the flags."""
     if a.symbol and a.from_path:
         raise PlanError("use --from or --symbol, not both")
-    if a.side in ("sell", "short"):
-        raise PlanError("v2 plans longs only: no stops above a short entry. Plan a buy instead.")
+    side = "sell" if a.side in ("sell", "short") else "buy"
     if a.symbol:
         if a.entry is None:
             raise PlanError("--symbol needs --entry PRICE")
@@ -555,12 +567,15 @@ def gather(a):
             raise PlanError("give both --or-high and --or-low, or neither")
         info = {"symbol": a.symbol.upper(), "entry": a.entry, "setup": a.setup or ("orb" if a.or_high is not None else "level"),
                 "date": a.date, "entry_time": a.time, "entry_bar": a.entry_bar, "interval": a.interval or "5m",
-                "or_high": a.or_high, "or_low": a.or_low, "or_minutes": a.or_minutes, "source": "flags"}
+                "or_high": a.or_high, "or_low": a.or_low, "or_minutes": a.or_minutes, "source": "flags",
+                "side": side}
     else:
         path = a.from_path or "trader/entry.json"
         doc = read_json(path, "entry (run /trader-entry first, or give --symbol and --entry)")
-        if str(doc.get("side") or "buy").lower() not in ("buy", "long"):
-            raise PlanError("%s is a %s: v2 plans longs only" % (path, doc.get("side")))
+        doc_side = str(doc.get("side") or "buy").lower()
+        if doc_side not in ("buy", "long", "sell", "short"):
+            raise PlanError("%s has side %r: buy or sell" % (path, doc.get("side")))
+        side = "sell" if doc_side in ("sell", "short") or side == "sell" else "buy"
         if doc.get("status") != "triggered" and a.entry is None:
             raise PlanError("%s says %s is %s, not triggered: plan once it triggers, or give --entry PRICE to plan ahead"
                             % (path, doc.get("symbol"), doc.get("status") or "unknown"))
@@ -572,7 +587,7 @@ def gather(a):
                 "interval": a.interval or doc.get("interval") or "5m",
                 "or_high": a.or_high if a.or_high is not None else orr.get("high"),
                 "or_low": a.or_low if a.or_low is not None else orr.get("low"),
-                "or_minutes": orr.get("minutes") or a.or_minutes, "source": path}
+                "or_minutes": orr.get("minutes") or a.or_minutes, "source": path, "side": side}
         if not info["symbol"] or info["entry"] is None:
             raise PlanError("%s has no symbol or price" % path)
     if info["interval"] not in INTERVALS:
@@ -609,13 +624,13 @@ def build_plan(a, now_utc):
                             % (info["interval"], info["symbol"], day, len(bars)))
         atr, atr_n = atr_of(bars)
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
-                atr, atr_n)
+                atr, atr_n, side=info["side"])
     flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
         orr = {"high": float(cents(info["or_high"])), "low": float(cents(info["or_low"])),
                "minutes": int(info["or_minutes"] or 15)}
-    plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": "buy", "date": day.isoformat(),
+    plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": info["side"], "date": day.isoformat(),
             "setup": info["setup"], "entry": float(c["entry"]),
             "entry_time": ampm(entry_time) if entry_time else None,
             "entry_bar": info["entry_bar"], "interval": info["interval"], "opening_range": orr,
@@ -653,8 +668,12 @@ def describe(plan):
         when = " at %s" % plan["entry_time"]
         if plan.get("entry_bar") is not None:
             when += " (bar %d)" % plan["entry_bar"]
-    out = ["Exit plan: %s long, %s, %s on %s bars" % (
-        plan["symbol"], day.strftime("%a %Y-%m-%d"), setup, "5-minute" if plan["interval"] == "5m" else "1-minute")]
+    dn = plan.get("side") == "sell"
+    if dn:
+        setup = {"orb": "opening-range breakdown", "level": "close below a level"}.get(plan["setup"], plan["setup"])
+    out = ["Exit plan: %s %s, %s, %s on %s bars" % (
+        plan["symbol"], "breakdown (the levels for a put)" if dn else "long", day.strftime("%a %Y-%m-%d"), setup,
+        "5-minute" if plan["interval"] == "5m" else "1-minute")]
     out.append("  Entry         %s%s" % (money(plan["entry"]), when))
     out.append("  Stop          %s  %s%s" % (money(plan["stop"]), plan["stop_label"],
                                              (": " + plan["stop_detail"]) if plan.get("stop_detail") else ""))
@@ -709,6 +728,175 @@ def cmd_show(a):
     return 0
 
 
+# ---------------------------------------------------------------- option plan (index -> CE / PE)
+
+OPTION_DEFAULTS = {"option_stop_pct": 30, "option_target": "2R", "option_strike": "atm",
+                   "option_expiry_switch": "13:30", "option_flat_by": "15:00"}
+OPTION_NOTE = ("Options can lose everything you pay. A stop on an option is a stop-limit (SL): in a fast "
+               "market it may not fill at all.")
+
+
+def tick_round(x, tick, how):
+    """Round to the option's price step: down, up or nearest."""
+    t = D(tick)
+    q = D(x) / t
+    q = q.to_integral_value(rounding={"down": ROUND_FLOOR, "up": ROUND_CEILING}.get(how, ROUND_HALF_UP))
+    return (q * t).quantize(CENT)
+
+
+def option_contract(a, plan, now_local, cfg):
+    """The contract: from the flags (--contract ...), or from Zerodha's option list via kite.py."""
+    kind = "PE" if plan.get("side") == "sell" else "CE"
+    spot = a.spot if a.spot is not None else plan["entry"]
+    switch = cfg.get("option_expiry_switch") or OPTION_DEFAULTS["option_expiry_switch"]
+    if a.contract:
+        missing = [f for f in ("expiry", "strike_price", "lot_size") if getattr(a, f) is None]
+        if missing:
+            raise PlanError("--contract needs --expiry, --strike-price and --lot-size too (missing: %s)"
+                            % ", ".join("--" + m.replace("_", "-") for m in missing))
+        sym = a.contract.strip().upper()
+        if not sym.endswith(kind):
+            raise PlanError("the plan is a %s, so it wants a %s, but %s is not one"
+                            % ("breakdown" if kind == "PE" else "breakout", "put (PE)" if kind == "PE" else
+                               "call (CE)", sym))
+        return {"tradingsymbol": sym, "exchange": "NFO", "expiry": a.expiry, "strike": float(a.strike_price),
+                "type": kind, "lot_size": int(a.lot_size), "tick_size": float(a.tick or 0.05),
+                "expiry_note": "from the flags", "source": "flags"}, spot
+    try:
+        import kite
+        root = kite.option_root(plan["symbol"])
+        chain = kite.option_chain(root)
+        expiry, why = kite.pick_expiry(chain, now_local, switch)
+        row = kite.pick_strike(chain, expiry, kind, spot, a.strike)
+    except ImportError:
+        raise PlanError("kite.py is missing from this folder: give the contract with --contract and friends")
+    except Exception as e:          # kite.KiteError: not logged in, no data, ...
+        raise PlanError("could not read the option list from Zerodha: %s. Or give --contract, --expiry, "
+                        "--strike-price, --lot-size and --premium yourself" % str(e).rstrip("."))
+    return dict(row, expiry_note=why, source="kite"), spot
+
+
+def build_option_plan(a, now_utc):
+    if globals().get("MARKET") != "IN":
+        raise PlanError("options here are NSE (NFO) options: run with --market IN")
+    plan = read_json(a.plan, "plan (run exit.py plan --write on the index first)")
+    for k in ("symbol", "entry", "stop", "target"):
+        if plan.get(k) is None:
+            raise PlanError("%s has no %s: make it with exit.py plan --write" % (a.plan, k))
+    cfg = dict(OPTION_DEFAULTS, **read_config(a.config))
+    raw_cfg = read_json(a.config, "config") if a.config and os.path.exists(a.config) else {}
+    for k in OPTION_DEFAULTS:
+        if raw_cfg.get(k) is not None:
+            cfg[k] = raw_cfg[k]
+    now_local = to_eastern(now_utc)
+    c, spot = option_contract(a, plan, now_local, cfg)
+    sym = c["tradingsymbol"]
+    if a.premium is not None:
+        prem, prem_src = a.premium, "your price"
+    else:
+        try:
+            import kite
+            prem = kite.ltp(["NFO:" + sym]).get("NFO:" + sym)
+        except Exception as e:
+            raise PlanError("could not read %s's price from Zerodha: %s. Give it with --premium"
+                            % (sym, str(e).rstrip(".")))
+        prem_src = "Zerodha's last price"
+    if not prem or prem <= 0:
+        raise PlanError("%s has no price (%r): give --premium" % (sym, prem))
+    tick = c["tick_size"] or 0.05
+    pct = D(a.stop_pct if a.stop_pct is not None else cfg["option_stop_pct"])
+    if not D(0) < pct < D(100):
+        raise PlanError("--stop-pct is a loss on the option's price between 0 and 100")
+    target_rule, target_param = parse_target(a.target or cfg["option_target"])
+    entry = tick_round(prem, tick, "nearest")
+    stop = tick_round(entry * (1 - pct / 100), tick, "down")
+    if stop <= 0 or entry - stop < D(tick):
+        raise PlanError("a %s%% stop on %s leaves no room (one price step is %s)" % (num(pct), money(entry), tick))
+    risk = entry - stop
+    if target_rule == "r":
+        target = tick_round(entry + target_param * risk, tick, "up")
+        t_label = r_label(target_param)
+    else:
+        target = tick_round(target_param, tick, "nearest")
+        if target <= entry:
+            raise PlanError("the target %s is at or below the entry %s" % (money(target), money(entry)))
+        t_label = "your price"
+    today = now_local.date().isoformat()
+    expiry_day = c["expiry"] == today
+    flat_by = cfg["option_flat_by"] if expiry_day else (plan.get("flat_by") or cfg.get("flat_by"))
+    lot = int(c["lot_size"])
+    out = {"created_by": "trader-exit", "kind": "option", "symbol": sym, "exchange": c.get("exchange", "NFO"),
+           "side": "buy", "underlying": plan["symbol"], "direction": "down" if plan.get("side") == "sell" else "up",
+           "option_type": c["type"], "strike": c["strike"], "expiry": c["expiry"], "expiry_day": expiry_day,
+           "expiry_note": c.get("expiry_note"), "strike_choice": a.strike if not a.contract else "flags",
+           "spot": float(spot), "lot_size": lot, "tick_size": float(tick),
+           "date": today, "entry": float(entry), "premium_source": prem_src, "stop": float(stop),
+           "stop_label": "%s%% under the price paid" % num(pct), "target": float(target), "target_label": t_label,
+           "risk_per_unit": float(risk), "risk_per_lot": float(risk * lot), "premium_per_lot": float(entry * lot),
+           "reward_risk": float(((target - entry) / risk).quantize(CENT, rounding=ROUND_HALF_UP)),
+           "flat_by": flat_by,
+           "index": {"entry": plan["entry"], "stop": plan["stop"], "target": plan["target"],
+                     "side": plan.get("side", "buy")},
+           "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": OPTION_NOTE}
+    if c.get("instrument_token"):
+        out["instrument_token"] = c["instrument_token"]
+    warnings = []
+    if expiry_day:
+        warnings.append("Expires TODAY: its price can fall fast as the close nears. New entries stop at %s, "
+                        "and it is out by %s." % (cfg["option_expiry_switch"], flat_by))
+    if plan.get("date") and plan["date"] != today:
+        warnings.append("The index plan is for %s, not today." % plan["date"])
+    return out, warnings
+
+
+def describe_option(o):
+    up = o["direction"] == "up"
+    out = ["Option plan: BUY %s %s, %s %s, %s" % (
+        o["symbol"], "(a call: NIFTY broke out)" if up and o["underlying"] == "^NSEI" else
+        "(a put: NIFTY broke down)" if o["underlying"] == "^NSEI" else
+        "(a call on the breakout)" if up else "(a put on the breakdown)",
+        num(o["strike"]), o["option_type"], o["expiry"] + (" (expires TODAY)" if o["expiry_day"] else ""))]
+    if o["strike_choice"] == "flags":
+        out.append("  Why this one  your contract (the index was at %s)" % money(o["spot"]))
+    else:
+        out.append("  Why this one  %s strike nearest %s %s; %s" % (
+            {"atm": "the", "itm1": "one in the money from the", "otm1": "one out of the money from the"}.get(
+                o["strike_choice"], o["strike_choice"]), o["underlying"], money(o["spot"]), o.get("expiry_note") or ""))
+    out.append("  Entry         %s a unit (%s), limit order" % (money(o["entry"]), o["premium_source"]))
+    out.append("  Stop          %s  %s, or the index at %s, whichever comes first"
+               % (money(o["stop"]), o["stop_label"], money(o["index"]["stop"])))
+    out.append("  Target        %s  %s, or the index at %s" % (money(o["target"]), o["target_label"],
+                                                               money(o["index"]["target"])))
+    out.append("  One lot       %d units: %s to buy, %s at the stop" % (
+        o["lot_size"], money(o["premium_per_lot"]), money(o["risk_per_lot"])))
+    out.append("  Flat by       %s IST" % o["flat_by"])
+    out.append(OPTION_NOTE)
+    return out
+
+
+def cmd_option(a):
+    now = parse_now(a.now)
+    o, warnings = build_option_plan(a, now)
+    if a.write:
+        d = os.path.dirname(a.write)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.write, "w", encoding="utf-8") as fh:
+            json.dump(o, fh, indent=2)
+            fh.write("\n")
+    if a.json:
+        print(json.dumps(dict(o, warnings=warnings), indent=2))
+        return 0
+    for line in describe_option(o):
+        print(line)
+    for w in warnings:
+        print("Note: " + w)
+    if a.write:
+        print("Wrote %s." % a.write)
+    print("Next: /trader-budget sizes it in lots to your max loss (size.py --option). Nothing was placed.")
+    return 0
+
+
 def main(argv=None):
     argv = market.setup(globals(), argv)
     ap = argparse.ArgumentParser(description="Exit Planner (trader-exit): the stop and target before the entry.")
@@ -725,7 +913,7 @@ def main(argv=None):
     p.add_argument("--time", help="entry time, e.g. 10:15 AM")
     p.add_argument("--entry-bar", type=int)
     p.add_argument("--interval", choices=["5m", "1m"])
-    p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="v2: buy only")
+    p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="sell: a breakdown's levels (stop above, target below), for a put on an index")
     p.add_argument("--stop", help="or-mid (orb default), or-low, price:X, pct:X, atr:K")
     p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X")
     p.add_argument("--flat-by", help="HH:MM New York (default: config flat_by, 15:55)")
@@ -734,6 +922,23 @@ def main(argv=None):
     p.add_argument("--now", help='pretend it is this New York time, e.g. "2026-10-19 10:15"')
     p.add_argument("--write", nargs="?", const="trader/plan.json", metavar="PATH",
                    help="save the plan (default trader/plan.json)")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("option", help="turn the index plan into a call or a put (NSE, --market IN)")
+    p.add_argument("--plan", default="trader/plan.json", help="the index plan (exit.py plan --write)")
+    p.add_argument("--strike", default="atm", choices=["atm", "itm1", "otm1"], help="atm (default), itm1, otm1")
+    p.add_argument("--stop-pct", type=float, help="stop at this %% loss on the option's price (default 30)")
+    p.add_argument("--target", help="2R (default), 1.5R, price:X")
+    p.add_argument("--premium", type=float, help="the option's price (default: Zerodha's last price)")
+    p.add_argument("--spot", type=float, help="the index level for the strike (default: the plan's entry)")
+    p.add_argument("--contract", help="the option, e.g. NIFTY26N2325300PE (skip Zerodha's option list)")
+    p.add_argument("--expiry", help="with --contract: YYYY-MM-DD")
+    p.add_argument("--strike-price", type=float, help="with --contract")
+    p.add_argument("--lot-size", type=int, help="with --contract")
+    p.add_argument("--tick", type=float, help="with --contract: price step (default 0.05)")
+    p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--now", help='pretend it is this time, e.g. "2026-11-18 10:00"')
+    p.add_argument("--write", nargs="?", const="trader/option_plan.json", metavar="PATH",
+                   help="save it (default trader/option_plan.json)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("show", help="print the current plan")
     p.add_argument("--plan", default="trader/plan.json")
@@ -744,7 +949,7 @@ def main(argv=None):
         ap.print_help()
         return 1
     try:
-        return {"plan": cmd_plan, "show": cmd_show}[a.cmd](a)
+        return {"plan": cmd_plan, "show": cmd_show, "option": cmd_option}[a.cmd](a)
     except PlanError as e:
         print("exit.py: %s" % e, file=sys.stderr)
         return 1

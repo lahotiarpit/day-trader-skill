@@ -182,6 +182,19 @@ them, and the same file sits in every skill that reads the clock.
   read from the `_usd` keys: put rupee amounts there until the budget and
   risk skills learn rupees, costs and India's intraday rules.
 
+## Options (NSE)
+
+An order with an `option` block (or exchange NFO / BFO) is an option. On top of every check above:
+
+- off unless `"allow_options": true`;
+- buy only: selling an option you do not hold would write it, so it is blocked;
+- whole lots, at most `max_lots` (default 2);
+- on its expiry day, no new entry after `option_expiry_switch` (13:30);
+- the max loss is (entry - stop) x units, against your per-trade and daily limits. A gap can
+  lose the whole premium: the ticket says so.
+
+Selling an option you hold (the stop, the flatten) is an exit and is never blocked.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

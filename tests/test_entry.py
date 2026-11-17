@@ -530,10 +530,12 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("holds TSLA, not NVDA", err)
 
-    def test_longs_only_and_flag_errors(self):
-        code, _, err = run(["check", "TSLA", "--offline", TSLA, "--side", "short"])
-        self.assertEqual(code, 1)
-        self.assertIn("v2 plans longs only", err)
+    def test_breakdown_side_and_flag_errors(self):
+        # --side short watches for a close below the range low: a signal, never a short sale
+        code, text, err = run(["check", "TSLA", "--offline", TSLA, "--side", "short", "--now", "2026-10-19 10:15"])
+        self.assertIn("opening-range breakdown", text)
+        self.assertIn("range low", text)
+        self.assertNotIn("closed above", text)
         code, _, err = run(["check", "TSLA", "--offline", TSLA, "--level", "300"])
         self.assertIn("--level is for --setup level", err)
         code, _, err = run(["check", "TSLA", "--offline", TSLA, "--setup", "level"])

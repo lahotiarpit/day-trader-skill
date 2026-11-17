@@ -435,6 +435,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         legs = o.get("take_profit_limit_price") is not None or o.get("stop_loss_stop_price") is not None
         bracket = oc == "bracket" or (not oc and legs)
         value = None
+        opt = o.get("option") if isinstance(o.get("option"), dict) else None
+        is_opt = opt is not None or str(o.get("exchange") or "").upper() in ("NFO", "BFO")
 
         # format
         if not sym:
@@ -480,12 +482,18 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                          % (oc or "advanced_instructions"))
 
         # asset
-        if sym and OCC.match(sym.replace(" ", "")):
+        if is_opt:
+            if not c.get("allow_options"):
+                reasons.append("asset: %s is an option; options are off (\"allow_options\": false). Turning them "
+                               "on is your decision: options can lose everything you pay" % sym)
+            else:
+                warns.append("option order: options can lose 100% of what you pay")
+        elif sym and OCC.match(sym.replace(" ", "")):
             if not c.get("allow_options"):
                 reasons.append("asset: %s is an option contract; options are off "
                                "(\"allow_options\": false)" % sym)
             else:
-                warns.append("option order: options can lose 100%% of what you pay")
+                warns.append("option order: options can lose 100% of what you pay")
         elif sym and ("/" in sym or not (IN_TICKER if globals().get("MARKET") == "IN" else TICKER).match(sym)):
             reasons.append("asset: %s does not look like a %s stock or ETF ticker; "
                            "this pack trades stocks and ETFs only"
@@ -574,6 +582,24 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             if over and not c.get("allow_short"):
                 reasons.append("short: selling more %s than you hold (%s shares); short selling is off. "
                                "If you bought it, record the fill first (ticket.py fill)" % (sym, _num(held)))
+
+        # options: buy only, whole lots, a lot cap, and no new entries late on expiry day
+        if is_opt and kind == "entry":
+            if side == "sell":
+                reasons.append("options: this pack only buys options (calls and puts); selling one you do not "
+                               "hold writes it, and the loss has no cap")
+            lot = int(_f((opt or {}).get("lot_size")) or 0)
+            if lot and q is not None and abs(q / lot - round(q / lot)) > 1e-9:
+                later.append("options: %s units is not a whole number of lots (a lot is %d)" % (_num(q), lot))
+            max_lots = int(_f(c.get("max_lots")) or 2)
+            if lot and q is not None and q / lot > max_lots + 1e-9:
+                later.append("options: %d lots is over your max_lots %d" % (round(q / lot), max_lots))
+            exp = str((opt or {}).get("expiry") or "")
+            cut = hhmm(c.get("option_expiry_switch") or "13:30", "option_expiry_switch")
+            if exp == now_et.date().isoformat() and cut and now_et.time() > cut:
+                later.append("options: it expires today and it is past %s: no new entries in an expiring option "
+                             "(exit.py option picks the next expiry after %s)" % (cut.strftime("%H:%M"),
+                                                                                 cut.strftime("%H:%M")))
 
         # day-trade checks: stop, loss, reward:risk, daily loss, trades, window, pdt
         max_loss = risk_ps = rr = stop = target = None
@@ -691,7 +717,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     acct["shares"][sym] = held - value / ref
         results.append({
             "index": i, "symbol": sym, "side": side, "kind": kind,
-            "amount": money(_f(notional) or 0) if notional is not None else ("%s shares" % qty),
+            "amount": money(_f(notional) or 0) if notional is not None else ("%s %s" % (qty, "units" if is_opt else "shares")),
             "value_usd": round(value, 2) if value is not None else None,
             "entry_ref": round(ref, 2) if ref else None, "entry_ref_from": ref_from,
             "stop": stop, "target": target, "risk_per_share": risk_ps, "max_loss": max_loss,

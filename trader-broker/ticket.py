@@ -45,6 +45,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -206,8 +207,18 @@ def broker_name(cfg):
     return {"ibkr": "Interactive Brokers", "zerodha": "Zerodha"}.get(broker_of(cfg), "Alpaca")
 
 
+def kite_tool(cfg):
+    """Which Kite MCP tool: "orders" (Zerodha's hosted connector, mode place, with its own
+    approval form) or "place_order" (the self-hosted kite-mcp-server)."""
+    return "place_order" if str(cfg.get("kite_tool", "orders")).lower() == "place_order" else "orders"
+
+
 def order_tool(cfg):
-    return "place_order" if broker_of(cfg) == "zerodha" else "place_stock_order"
+    return kite_tool(cfg) if broker_of(cfg) == "zerodha" else "place_stock_order"
+
+
+def is_option(order):
+    return isinstance(order.get("option"), dict) or str(order.get("exchange") or "").upper() in ("NFO", "BFO")
 
 
 def kite_input(order, cfg):
@@ -216,7 +227,7 @@ def kite_input(order, cfg):
     stop-loss and take-profit are NOT in it: Zerodha has no bracket orders for
     stocks, so the stop is its own order later (ticket.py protect)."""
     sym = str(order.get("symbol", "")).strip().upper()
-    exchange = "NSE"
+    exchange = str(order.get("exchange") or "NSE").upper()
     if sym.endswith(".BO"):
         exchange, sym = "BSE", sym[:-3]
     elif sym.endswith(".NS"):
@@ -235,6 +246,12 @@ def kite_input(order, cfg):
     if typ in ("stop", "stop_limit") and order.get("stop_price") is not None:
         out["trigger_price"] = _f(order["stop_price"])
     out["tag"] = KITE_TAG
+    if kite_tool(cfg) == "orders":
+        # the hosted connector: one "orders" tool, mode place; market protection on any order
+        # that fills at the market (Zerodha's own order window adds it too)
+        out = dict({"mode": "place"}, **out)
+        if out["order_type"] in ("MARKET", "SL-M"):
+            out["market_protection"] = -1
     return out
 
 
@@ -253,6 +270,13 @@ def zerodha_problem(order, cfg):
     typ = str(order.get("type", "market")).lower()
     if typ not in KITE_TYPES:
         return "Zerodha has no %s order type for stocks" % typ.replace("_", " ")
+    if is_option(order):
+        if typ == "stop":
+            return ("Zerodha does not take stop-loss market (SL-M) orders on options: use a stop-limit "
+                    "(ticket.py protect makes one)")
+        lot = int(_f((order.get("option") or {}).get("lot_size")) or 0)
+        if lot and q % lot:
+            return "%s units is not a whole number of lots (a lot is %d)" % (_str_num(q), lot)
     if str(order.get("time_in_force", "day")).lower() not in KITE_VALIDITY:
         return "Zerodha orders are good for the day (or IOC), not %s" % order.get("time_in_force")
     return None
@@ -320,6 +344,11 @@ def plain_parts(order):
         return parts
     if order.get("notional") is not None:
         what = "%s of %s" % (_money(order["notional"]), sym)
+    elif is_option(order):
+        q = _str_num(order.get("qty"))
+        lot = int(_f((order.get("option") or {}).get("lot_size")) or 0)
+        lots = (" (%d lot%s)" % (int(_f(q)) // lot, "" if int(_f(q)) // lot == 1 else "s")) if lot else ""
+        what = "%s units%s of %s" % (q, lots, sym)
     else:
         q = _str_num(order.get("qty"))
         what = "%s share%s of %s" % (q, "" if q == "1" else "s", sym)
@@ -459,9 +488,22 @@ def render(order, idx, total, cfg, risk, state, today):
         lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
         lines.append("  IBKR account, and it only goes to the market after you approve it there.")
     elif broker == "zerodha":
-        lines.append("  Claude will call the Kite MCP server's place_order with exactly:")
+        if kite_tool(cfg) == "orders":
+            lines.append("  Claude will call the Kite connector's orders tool with exactly:")
+        else:
+            lines.append("  Claude will call the Kite MCP server's place_order with exactly:")
         for l in json.dumps(kite_input(order, cfg), indent=2).splitlines():
             lines.append("    " + l)
+        plan_stop = _f((order.get("plan") or {}).get("stop"))
+        if is_option(order) and str(order.get("side", "")).lower() == "buy" and plan_stop:
+            lines.append("  This is the ENTRY ONLY. The moment it fills, the stop at %s goes in as its own"
+                         % _p(plan_stop))
+            lines.append("  stop-limit order (ticket.py protect), for its own yes. Until then it has no stop.")
+            ix = (order.get("plan") or {}).get("index") or {}
+            if ix.get("stop"):
+                lines.append("  Also out if the index reaches %s (stop) or %s (target): trader-alerts watches those."
+                             % (_p(ix["stop"]), _p(ix["target"])))
+            lines.append("  Options can lose everything you pay.")
         if is_bracket(order):
             stop = order.get("stop_loss_stop_price")
             lines.append("  Zerodha has no bracket orders for stocks: this sends the ENTRY ONLY. The moment it")
@@ -475,6 +517,11 @@ def render(order, idx, total, cfg, risk, state, today):
         lines.append("  Zerodha rejects a price that is not a multiple of the stock's tick size (often 0.05).")
         if str(cfg.get("kite_product", "MIS")).upper() == "MIS":
             lines.append("  MIS is intraday: Zerodha squares off what is still open from about 15:20 IST.")
+        else:
+            lines.append("  %s is not squared off by Zerodha: getting out by the flat-by time is up to you."
+                         % str(cfg.get("kite_product")).upper())
+        if kite_tool(cfg) == "orders":
+            lines.append("  Kite then shows its own approval form: nothing is sent until you approve it there.")
     else:
         lines.append("  Claude will call place_stock_order with exactly:")
         for l in json.dumps(tool_input(order), indent=2).splitlines():
@@ -623,6 +670,9 @@ def cmd_approve(a):
            "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
            "plain": plain(order), "status": "approved", "reply": a.reply,
            "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
+    if is_option(order):
+        rec["exchange"] = str(order.get("exchange") or "NFO").upper()
+        rec["option"] = order.get("option")
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
@@ -630,7 +680,8 @@ def cmd_approve(a):
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
     else:
         print("Now call %s with exactly:" % (
-            "the Kite MCP server's place_order" if broker_of(cfg) == "zerodha" else "place_stock_order"))
+            ("the Kite connector's orders tool" if kite_tool(cfg) == "orders" else "the Kite MCP server's place_order")
+            if broker_of(cfg) == "zerodha" else "place_stock_order"))
         print(json.dumps(tool_args(order, cfg), indent=2))
         print("Claude's card shows Allow once / Deny. Then: ticket.py result --index %d --status "
               "placed|denied|failed" % a.index)
@@ -658,7 +709,7 @@ def cmd_result(a):
         raise TicketError("order %d has no yes recorded today; a result can only follow an approval" % a.index)
     new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
            "side": rec["side"], "plain": rec["plain"], "status": a.status}
-    for k in ("qty", "kind", "max_loss", "stop"):
+    for k in ("qty", "kind", "max_loss", "stop", "exchange", "option"):
         if rec.get(k) is not None:
             new[k] = rec[k]
     if a.broker_id:
@@ -722,6 +773,12 @@ def cmd_flatten(a):
     order = {"symbol": sym, "side": "sell", "qty": _str_num(qty), "type": "market", "time_in_force": "day",
              "why": "flat by %s %s: closes the %s day trade before the close (qty from %s)"
              % (flat_by, zone, sym, source)}
+    for rec in load_state(getattr(a, "state", "trader/state/broker.json")).get("orders", []):
+        if (str(rec.get("symbol", "")).upper() == sym and rec.get("status") == "placed" and rec.get("option")
+                and str(rec.get("side", "")).lower() == "buy"):
+            order.update({"exchange": rec.get("exchange", "NFO"), "option": rec["option"]})
+            if (rec["option"] or {}).get("flat_by"):
+                order["why"] = order["why"].replace("flat by %s" % flat_by, "flat by %s" % rec["option"]["flat_by"])
     old = read_json(a.orders, "orders", required=False)
     replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
@@ -735,15 +792,15 @@ def cmd_flatten(a):
     zerodha = broker_of(cfg) == "zerodha"
     if a.qty is None:
         print("The qty comes from %s. Check it against %s before you say yes."
-              % (source, "the Kite MCP server's get_positions" if zerodha else "get_open_position %s" % sym))
+              % (source, "your Kite positions" if zerodha else "get_open_position %s" % sym))
     print("Next:")
     print("  1. trader-risk: check.py. A sell that only closes what you hold is never blocked by the daily")
     print("     limits or the entry window.")
     print("  2. ticket.py show, then the user's yes for this one order.")
     if zerodha:
-        print("  3. If the stop-loss order (SL-M) is still open at Zerodha, cancel it FIRST: get_orders shows it,")
-        print("     then cancel_order (variety regular, its order_id; Needs approval). Otherwise both sells can")
-        print("     fill and leave you short. Then place_order with the ticket.")
+        print("  3. If the stop-loss order is still open at Zerodha, cancel it FIRST: list today's orders to find it,")
+        print("     then cancel it (variety regular, its order_id; it needs your approval). Otherwise both sells can")
+        print("     fill and leave you short. Then place the ticket's order.")
     else:
         print("  3. If the bracket's stop-loss and take-profit are still open, Alpaca holds these shares for them")
         print("     and rejects a new sell. Cancel them first: get_orders (status open, nested true), then")
@@ -778,6 +835,17 @@ def cmd_protect(a):
              "time_in_force": "day",
              "why": "stop-loss for the %s entry%s: Zerodha has no bracket orders, so the stop is its own order"
              % (sym, (" placed at %s" % entry["at"][11:16]) if entry and entry.get("at") else "")}
+    if entry and entry.get("option"):
+        # options: Zerodha takes no SL-M, so a stop-limit, its limit a little under the trigger
+        opt = entry["option"]
+        tick = _f(opt.get("tick_size")) or 0.05
+        pct = _f(cfg.get("option_stop_limit_pct")) or 5.0
+        limit = math.floor((stop * (1 - pct / 100.0)) / tick + 1e-9) * tick
+        limit = round(max(tick, min(limit, stop - tick)), 2)
+        order.update({"type": "stop_limit", "limit_price": "%.2f" % limit, "exchange": entry.get("exchange", "NFO"),
+                      "option": opt,
+                      "why": "stop-loss for the %s option entry: a stop-limit (Zerodha takes no SL-M on options), "
+                             "trigger %s, limit %.2f. In a fast fall it may not fill: watch it" % (sym, _p(stop), limit)})
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
            "paper": bool(cfg.get("paper", True)),
            "note": "Protective stop. Nothing is placed until trader-risk passes it and you say yes in the chat.",
@@ -786,7 +854,8 @@ def cmd_protect(a):
     print("Protect %s: %s." % (sym, plain(order)))
     print("Wrote it to %s. Next, without waiting: trader-risk (check.py), ticket.py show, then the yes for this"
           % a.orders)
-    print("one order, then the Kite MCP server's place_order. Until it is placed the position has no stop.")
+    print("one order, then %s. Until it is placed the position has no stop."
+          % ("the Kite connector's orders tool" if kite_tool(cfg) == "orders" else "the Kite MCP server's place_order"))
     return 0
 
 
@@ -862,6 +931,7 @@ def main(argv=None):
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--plan", default="trader/plan.json")
     p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--state", default="trader/state/broker.json")
     clock(p)
     p = sub.add_parser("protect", help="Zerodha: the stop-loss order for an entry that just filled")
     p.add_argument("--symbol", required=True)

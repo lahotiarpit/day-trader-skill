@@ -179,6 +179,16 @@ python3 trader-entry/entry.py check SBIN --setup orb --market IN
   after the entry fills (`ticket.py protect`), and the target is watched by
   trader-alerts. See trader-broker's SKILL.md, Setup C.
 
+### NIFTY options
+
+The skills read the **index** for the signal and buy **one option** for the trade: a breakout
+(`entry.py check ^NSEI`) buys a call, a breakdown (`--side sell`) a put. `exit.py option` picks
+the at-the-money strike and the nearest expiry (the next one after 13:30 on expiry day), with a
+stop 30% under the price paid and a 2R target. `size.py --option` sizes it in whole lots to your
+max loss. trader-risk keeps it buy-only, whole lots, `max_lots`, and no new entries late on
+expiry day; the stop goes in as a stop-limit after the fill. Off until you set
+`"allow_options": true`. Options can lose everything you pay.
+
 Not yet for India: the budget and risk money rules (amounts are plain numbers,
 with no Indian trading costs), the news and analyst skills (SEC filings) and the
 Pelosi tracker (US Congress). Each skill's SKILL.md says what switches.

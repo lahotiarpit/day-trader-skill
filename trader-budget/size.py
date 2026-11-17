@@ -770,6 +770,141 @@ def write_orders(path, orders, cfg, source="", now_utc=None):
     os.replace(tmp, path)
 
 
+# ---------------------------------------------------------------- option mode (NSE: whole lots)
+
+def size_option(op, cfg, cash=None, today=None):
+    """Pure function: an option plan (trader-exit option) + your rules -> lots (may be 0).
+    The loss at the stop is (entry - stop) x lot size x lots; buying options only."""
+    c = dict(DEFAULTS)
+    c.update(cfg or {})
+    if not isinstance(op, dict) or op.get("kind") != "option":
+        raise SizeError("that is not an option plan: make one with exit.py option --write")
+    if not c.get("allow_options"):
+        raise SizeError("options are off in your config (\"allow_options\": false). Turning them on is your "
+                        "decision: options can lose everything you pay")
+    if str(op.get("side") or "buy").lower() != "buy":
+        raise SizeError("this pack only BUYS options (calls and puts); it never sells or writes them")
+    if today and op.get("date") and str(op["date"]) != today:
+        raise SizeError("the option plan is for %s and today is %s: make a new one with exit.py option"
+                        % (op["date"], today))
+    sym = str(op.get("symbol") or "").upper()
+    entry, stop, target = _f(op.get("entry")), _f(op.get("stop")), _f(op.get("target"))
+    lot = int(op.get("lot_size") or 0)
+    if not sym or lot <= 0 or not entry or not stop or not target or not stop < entry < target:
+        raise SizeError("the option plan needs a symbol, a lot size and stop < entry < target")
+    budget = float(c.get("budget") or 0)
+    if budget <= 0:
+        raise SizeError("no budget: set \"budget\" in trader/config.json")
+    buf_pct = float(c.get("cash_buffer_pct") or 0)
+    cash_buffer = round(budget * buf_pct / 100.0, 2)
+    available = budget - cash_buffer
+    cash_note = "budget %s minus the %s cash buffer" % (money(budget), money(cash_buffer))
+    if cash is not None and cash - cash_buffer < available - 0.005:
+        available = cash - cash_buffer
+        cash_note = "cash %s minus the %s buffer" % (money(cash), money(cash_buffer))
+    available = max(round(available, 2), 0.0)
+    risk_lot = round((entry - stop) * lot, 2)
+    cost_lot = round(entry * lot, 2)
+    limits = []
+    max_loss = _f(c.get("max_loss_per_trade_usd"))
+    if max_loss:
+        limits.append({"name": "max loss", "lots": int(math.floor(max_loss / risk_lot + EPS)),
+                       "how": "%s max loss / %s a lot at the stop" % (money(max_loss), money(risk_lot))})
+    max_lots = int(_f(c.get("max_lots")) or 2)
+    limits.append({"name": "max lots", "lots": max_lots, "how": "your max_lots %d" % max_lots})
+    cap_pct = _f(c.get("max_position_pct"))
+    if cap_pct:
+        cap = round(budget * cap_pct / 100.0, 2)
+        limits.append({"name": "position cap", "lots": int(math.floor(cap / cost_lot + EPS)),
+                       "how": "%s%% of %s = %s / %s a lot" % (_num(cap_pct), money(budget), money(cap), money(cost_lot))})
+    max_order = _f(c.get("max_order_usd"))
+    if max_order:
+        limits.append({"name": "max order", "lots": int(math.floor(max_order / cost_lot + EPS)),
+                       "how": "%s / %s a lot" % (money(max_order), money(cost_lot))})
+    limits.append({"name": "cash", "lots": int(math.floor(available / cost_lot + EPS)) if cost_lot else 0,
+                   "how": "%s = %s / %s a lot" % (cash_note, money(available), money(cost_lot))})
+    lots = max(0, min(l["lots"] for l in limits))
+    bound = [l["name"] for l in limits if l["lots"] == lots][0]
+    refusal = None
+    if lots == 0:
+        if bound == "max loss":
+            pct = round(100.0 * max_loss / (entry * lot), 1) if entry else 0
+            refusal = ("one lot (%d units) loses %s at the stop %s, more than your %s max loss per trade. No order. "
+                       "Skip it, or plan a tighter stop (about %s%% would fit: exit.py option --stop-pct %s), "
+                       "or a cheaper strike (--strike otm1)." % (lot, money(risk_lot), _price(stop), money(max_loss),
+                                                                 _num(pct), _num(max(1, math.floor(pct)))))
+        else:
+            refusal = "one lot costs %s, more than your %s limit. No order." % (money(cost_lot), bound)
+    return {"symbol": sym, "kind": "option", "lots": lots, "lot_size": lot, "qty": lots * lot, "entry": entry,
+            "stop": stop, "target": target, "risk_per_lot": risk_lot, "cost_per_lot": cost_lot,
+            "cost": round(lots * cost_lot, 2), "max_loss": round(lots * risk_lot, 2), "limits": limits,
+            "bound_by": bound, "refusal": refusal, "budget": budget, "cash_available": available,
+            "max_loss_per_trade_usd": max_loss, "flat_by": op.get("flat_by"), "plan": op}
+
+
+def option_order(s):
+    """The entry: a LIMIT buy of whole lots. The stop goes in after the fill (ticket.py protect)."""
+    if s["refusal"] or s["lots"] <= 0:
+        return None
+    op = s["plan"]
+    return {"symbol": s["symbol"], "exchange": op.get("exchange", "NFO"), "side": "buy", "qty": str(s["qty"]),
+            "type": "limit", "limit_price": "%.2f" % s["entry"], "time_in_force": "day",
+            "option": {"underlying": op.get("underlying"), "type": op.get("option_type"), "strike": op.get("strike"),
+                       "expiry": op.get("expiry"), "expiry_day": op.get("expiry_day"), "lot_size": s["lot_size"],
+                       "lots": s["lots"], "tick_size": op.get("tick_size"), "flat_by": op.get("flat_by")},
+            "plan": {"kind": "option", "entry": s["entry"], "stop": s["stop"], "target": s["target"],
+                     "max_loss": s["max_loss"], "index": op.get("index"), "flat_by": op.get("flat_by")},
+            "why": "%s %s on %s: %d lot%s of %d, bound by your %s (%s at the stop)" % (
+                "call" if op.get("option_type") == "CE" else "put",
+                "(breakout)" if op.get("direction") == "up" else "(breakdown)", op.get("underlying"),
+                s["lots"], "" if s["lots"] == 1 else "s", s["lot_size"], s["bound_by"], money(s["max_loss"]))}
+
+
+def option_report(s, order):
+    op = s["plan"]
+    out = ["Option sizing: %s %s %s, expiry %s%s" % (
+        op.get("underlying"), "call" if op.get("option_type") == "CE" else "put", s["symbol"], op.get("expiry"),
+        " (TODAY)" if op.get("expiry_day") else "")]
+    out.append("  entry %s, stop %s, target %s a unit; one lot = %d units = %s, %s at the stop" % (
+        _price(s["entry"]), _price(s["stop"]), _price(s["target"]), s["lot_size"], money(s["cost_per_lot"]),
+        money(s["risk_per_lot"])))
+    for l in s["limits"]:
+        out.append("  %-13s %3d lot%s  (%s)%s" % (l["name"], l["lots"], " " if l["lots"] == 1 else "s", l["how"],
+                                                "  <- decides" if l["name"] == s["bound_by"] else ""))
+    if s["refusal"]:
+        out.append("REFUSED: " + s["refusal"])
+    else:
+        out.append("  BUY %d lot%s = %d units %s, limit %s, good for today: %s to pay, about %s lost at the stop."
+                   % (s["lots"], "" if s["lots"] == 1 else "s", s["qty"], s["symbol"], _price(s["entry"]),
+                      money(s["cost"]), money(s["max_loss"])))
+        out.append("  The stop (%s) goes in as its own stop-limit order right after the fill: ticket.py protect."
+                   % _price(s["stop"]))
+    out.append("Options can lose everything you pay. Next: trader-risk checks it, then trader-broker asks you yes or no.")
+    out.append("Education and tooling, not financial advice.")
+    return "\n".join(out).replace("$", "\u20b9")     # NSE options: rupees
+
+
+def run_option(a, cfg):
+    now = parse_now(a.now)
+    today = (now + datetime.timedelta(hours=5, minutes=30)).date().isoformat()     # IST
+    op = read_json(a.option, "option plan (run exit.py option --write first)")
+    cash = None
+    if a.portfolio and os.path.exists(a.portfolio):
+        pf = read_json(a.portfolio, "portfolio")
+        cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
+    s = size_option(op, cfg, cash, today)
+    order = option_order(s)
+    if order and a.write:
+        write_orders(a.write, [order], cfg, "%s (%s option plan %s)" % (a.option, s["symbol"], op.get("date")), now)
+    if a.json:
+        print(json.dumps({"sizing": s, "orders": [order] if order else []}, indent=2))
+    else:
+        print(option_report(s, order))
+        if order and a.write:
+            print("Wrote 1 proposed option order to %s" % a.write)
+    return 0 if order else 1
+
+
 # ---------------------------------------------------------------- main
 
 def run_plan(a, cfg):
@@ -858,6 +993,8 @@ def main(argv=None):
     ap.add_argument("--write", nargs="?", const="trader/orders.json", metavar="PATH",
                     help="write the proposed order (default trader/orders.json)")
     ap.add_argument("--json", action="store_true", help="print JSON instead of the report")
+    ap.add_argument("--option", nargs="?", const="trader/option_plan.json", metavar="PATH",
+                    help="size an option plan in whole lots (exit.py option --write; NSE)")
     g = ap.add_argument_group("weights mode (split a budget across a list)")
     g.add_argument("--weights", help="inline weights: AAPL=22.04,AXP=17.14")
     g.add_argument("--targets", help="a weights file: {\"weights\": [{\"ticker\", \"weight\"}]}")
@@ -867,6 +1004,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         cfg = load_config(a.config)
+        if a.option:
+            return run_option(a, cfg)
         if a.weights or a.targets:
             return run_weights(a, cfg)
         if a.top or a.whole_shares or a.cents:
