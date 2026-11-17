@@ -207,9 +207,20 @@ def _get(url, timeout=20):
         return r.read().decode("utf-8", "replace")
 
 
+def kite_get(path):
+    """--data kite: the same Yahoo path, answered from Zerodha by kite.py (same folder)."""
+    import kite
+    try:
+        return kite.yahoo_get(path)
+    except kite.KiteError as e:
+        raise TMError(str(e))
+
+
 def fetch_chart(sym):
     """One request for 60 days of 5-min bars. query2 first, one retry after a 429,
     then query1 on 429 or 5xx."""
+    if market.DATA == "kite":
+        return kite_get("/v8/finance/chart/%s?range=60d&interval=5m" % market.url_symbol(to_yahoo(sym)))
     last = None
     for n, host in enumerate(HOSTS):
         if n:

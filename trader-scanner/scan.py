@@ -244,9 +244,20 @@ def http_get(url, timeout=20):
         return r.read().decode("utf-8", "replace")
 
 
+def kite_get(path):
+    """--data kite: the same Yahoo path, answered from Zerodha by kite.py (same folder)."""
+    import kite
+    try:
+        return kite.yahoo_get(path)
+    except kite.KiteError as e:
+        raise ScanError(str(e))
+
+
 def yahoo_get(path):
     """GET a Yahoo Finance path. query2 first, query1 on a 429 or 5xx, and one
     more round after BACKOFF seconds if a 429 was seen. 4xx other than 429 is final."""
+    if market.DATA == "kite":
+        return kite_get(path)
     last = "no answer"
     for attempt in (0, 1):
         saw_429 = False

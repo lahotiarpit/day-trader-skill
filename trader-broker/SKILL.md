@@ -10,10 +10,12 @@ description: >-
   and logs each trade's max loss so trader-risk can hold the daily limit.
   Covers setting up Alpaca's official MCP server in Claude Desktop (paper by
   default, keys in env vars, never in chat), the Interactive Brokers
-  connector, and setting order tools to "Needs approval". Use when the user
+  connector, Zerodha's Kite MCP server for NSE (real money only: Zerodha has
+  no paper account; the stop-loss goes in as its own order with `protect`),
+  and setting order tools to "Needs approval". Use when the user
   says "place the order", "buy it", "execute", "send it to my broker",
-  "close my position", "flatten", "get me out", "connect Alpaca", "set up
-  paper trading", or after /trader-risk passes.
+  "close my position", "flatten", "get me out", "connect Alpaca", "connect
+  Zerodha", "Kite", "set up paper trading", or after /trader-risk passes.
 argument-hint: "[order number]"
 ---
 
@@ -38,6 +40,7 @@ python3 "${CLAUDE_SKILL_DIR}/ticket.py" approve --index 1 --reply "yes"
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status placed --broker-id ID --filled-qty 8 --filled-price 364.20
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol TSLA --side sell --qty 8 --price 370.04
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" flatten --symbol TSLA --qty 8
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" protect --symbol RELIANCE     # Zerodha: the stop-loss after the entry fills
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" log
 ```
 
@@ -135,6 +138,65 @@ submits orders directly to the market. So with IBKR the final yes happens in
 IBKR as well. Set `"broker": "ibkr"` in `trader/config.json`. Set its tools
 that draft orders to Needs approval too.
 
+## Setup C: Zerodha (Kite MCP server, NSE and BSE)
+
+**Zerodha has no paper account. Every Zerodha order is real money.** So a
+Zerodha ticket stays NOT READY until the user sets `"paper": false` in
+`trader/config.json` themselves. Never set it for them, never suggest it as a
+fix for a NOT READY ticket, and say "real money" in every Zerodha ticket.
+
+Zerodha publishes its own MCP server: github.com/zerodha/kite-mcp-server (read
+2026-11-17). Its tools include `login`, `place_order`, `modify_order`,
+`cancel_order`, `get_orders`, `get_positions`, `get_quotes` and
+`get_historical_data`. Two ways to run it:
+
+- **Hosted**, no install and no API key: add a custom connector in Customize >
+  Connectors with the URL `https://mcp.kite.trade/mcp`. Its README says the
+  hosted server leaves out "potentially destructive trading operations": if
+  `place_order` is not in its tool list, it can read but not trade. Use the
+  self-hosted one to place orders.
+- **Self-hosted**, with the user's own Kite Connect app (developers.kite.trade):
+  install Go, then `git clone https://github.com/zerodha/kite-mcp-server`,
+  `cd kite-mcp-server`, `go build -o kite-mcp-server`. In Claude Desktop,
+  Settings > Developer > Edit Config, add the block in
+  `kite_mcp_config.example.json` here, with the full path to the binary, and the
+  user types their own API key and secret into that file. **Keys never go in the
+  chat.** `EXCLUDED_TOOLS` there hides the GTT tools, which this pack does not use.
+
+Then, for both:
+
+1. Restart Claude Desktop. Each trading day, ask Claude to run the Kite
+   `login` tool and open its link: Zerodha ends every session at 6:00 AM IST.
+2. **Set the tool permissions** (Customize > Connectors > kite): `place_order`,
+   `modify_order` and `cancel_order` on **Needs approval**, never Always allow.
+   Read-only tools (`get_profile`, `get_margins`, `get_positions`, `get_orders`,
+   `get_quotes`, `get_ltp`) can be Always allow. In Claude Code:
+   `"permissions": {"ask": ["mcp__kite__place_order", "mcp__kite__modify_order", "mcp__kite__cancel_order"]}`.
+3. In `trader/config.json`: `"market": "IN"`, `"broker": "zerodha"`, and
+   `"kite_product": "MIS"` (intraday, the default; `"CNC"` holds overnight).
+   `"paper": false` is the user's own decision and their own edit.
+4. Check it: ask Claude for the Kite profile and margins (read only).
+
+**How a Zerodha day trade differs.** Zerodha has no bracket orders for stocks,
+so trader-budget's bracket goes out as three steps, each with its own yes:
+
+1. The ticket sends the **entry only** (`place_order`, MIS, MARKET or LIMIT).
+2. The moment it fills, `ticket.py result ... --filled-qty Q --filled-price P`,
+   then `ticket.py protect --symbol SYM` writes the **stop-loss** (SL-M, a sell
+   at the plan's stop). trader-risk, `ticket.py show`, the user's yes,
+   `place_order`. Until then the position has no stop at the broker: say so,
+   and do this first.
+3. The **take-profit is not sent**: two open sells for one position could both
+   fill and leave the user short. trader-alerts watches the target; when it
+   rings, `ticket.py flatten`, and cancel the SL-M first (`get_orders`, then
+   `cancel_order` with variety regular and its order_id), then sell.
+
+Zerodha squares off open MIS positions from about 15:20 IST; the pack's flat-by
+for India is 15:10. Zerodha rejects a price that is not a multiple of the
+stock's tick size; a rejected stop means no stop, so check `get_orders` after
+every placement. Run every ticket.py command with `--market IN` (or have
+`"market": "IN"` in the config) so dates and times are India's.
+
 ## Steps: the entry
 
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT
@@ -145,8 +207,8 @@ that draft orders to Needs approval too.
    If it prints "Not recorded", the reply was not an explicit yes for this
    order (for example "sure", "yes to all", or a yes that names a different
    stock or amount). Ask again. Never turn a reply into a yes yourself.
-4. Only after "Recorded your yes", call `place_stock_order` with exactly the
-   JSON the ticket printed. Claude's card appears: Allow once or Deny.
+4. Only after "Recorded your yes", call `place_stock_order` (Zerodha: the Kite
+   MCP server's `place_order`) with exactly the JSON the ticket printed. Claude's card appears: Allow once or Deny.
 5. Record what happened: `ticket.py result --index N --status placed
    --broker-id <id> --filled-qty Q --filled-price P` (the fill from the
    response or `get_open_position`), or `--status denied`, or `--status failed`
@@ -197,6 +259,7 @@ buttons: Allow once, Deny. Allow once sends it to the paper account. The
 - Never places orders from a scheduled or background task: nobody is there to say yes.
 - Never asks for, reads, stores or repeats API keys or passwords.
 - Never switches `ALPACA_PAPER_TRADE` or `"paper"` to live. The user does that themselves.
+- Never sends a Zerodha take-profit and a stop-loss as two open sells for one position.
 - Never calls `close_all_positions`, `cancel_all_orders`, option or crypto order tools on its own.
 - Never promises a fill price: a market order and a stop fill at whatever the market gives.
 
