@@ -88,6 +88,9 @@ TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
 TIFS = {"day", "gtc", "opg", "cls", "ioc", "fok"}
 OCC = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 TICKER = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+# NSE / BSE symbols under --market IN: letters, digits, & and - (M&M, BAJAJ-AUTO,
+# 3MINDIA, GVT&D), optionally with Yahoo's .NS or .BO suffix
+IN_TICKER = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}(\.(NS|BO))?$")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
@@ -228,11 +231,12 @@ def window_check(now_et, c):
     stamp = now_et.strftime("%a %Y-%m-%d %H:%M")
     if not ok:
         return ["window: the market is closed today (%s, %s New York)" % (why, stamp)], warns
-    close = EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE
+    early = d.isoformat() in NYSE_EARLY_CLOSE    # NSE has none, and its EARLY equals its CLOSE
+    close = EARLY if early else CLOSE
     if t < OPEN or now_et.time() >= close:
         return ["window: the market is closed (%s New York; the session is %s to %s)"
                 % (stamp, OPEN.strftime("%H:%M"), close.strftime("%H:%M"))], warns
-    if close == EARLY and after is not None:
+    if early and after is not None:
         after = _shift(after, 3)
         warns.append("early close at 1:00 p.m. today (%s): no new entries after %s"
                      % (NYSE_EARLY_CLOSE[d.isoformat()], after.strftime("%H:%M")))
@@ -482,9 +486,10 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                "(\"allow_options\": false)" % sym)
             else:
                 warns.append("option order: options can lose 100%% of what you pay")
-        elif sym and ("/" in sym or not TICKER.match(sym)):
-            reasons.append("asset: %s does not look like a US stock or ETF ticker; "
-                           "this pack trades stocks and ETFs only" % sym)
+        elif sym and ("/" in sym or not (IN_TICKER if globals().get("MARKET") == "IN" else TICKER).match(sym)):
+            reasons.append("asset: %s does not look like a %s stock or ETF ticker; "
+                           "this pack trades stocks and ETFs only"
+                           % (sym, "NSE or BSE" if globals().get("MARKET") == "IN" else "US"))
 
         # the reference price: what one share costs to get in
         plan_entry = _f(plan.get("entry"))
