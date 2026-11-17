@@ -207,6 +207,13 @@ class Login(KiteCase):
             kite.access_token(now=datetime.datetime(2026, 11, 17, 6, 0))
         self.assertIn("kite.py login", str(e.exception))
 
+    def test_certificate_errors_say_how_to_fix_them(self):
+        hint = kite.cert_hint("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        self.assertIn("Install Certificates.command", hint)
+        self.assertIn("certifi", hint)
+        self.assertIn("Do not turn certificate checks off", hint)
+        self.assertEqual(kite.cert_hint("timed out"), "")
+
     def test_auth_header_and_token_errors(self):
         kite.get("/instruments/NSE", raw=True)
         _, _, hdrs = self.fake.calls[-1]

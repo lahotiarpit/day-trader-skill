@@ -145,7 +145,21 @@ def _open(url, data=None, hdrs=None, timeout=20):
         finally:
             e.close()
     except urllib.error.URLError as e:
-        raise KiteError("could not reach Zerodha (%s): %s" % (url.split("/")[2], e.reason))
+        raise KiteError("could not reach Zerodha (%s): %s%s" % (url.split("/")[2], e.reason, cert_hint(e.reason)))
+
+
+def cert_hint(reason):
+    """Python from python.org on a Mac ships without the certificates it needs to
+    check https sites. Say how to fix that; never turn the check off."""
+    if "CERTIFICATE_VERIFY_FAILED" not in str(reason):
+        return ""
+    ver = "%d.%d" % sys.version_info[:2]
+    return ("\nThis Python cannot check https certificates yet (common with Python from python.org on a Mac). "
+            "Fix it once, then run this again:\n"
+            "  open \"/Applications/Python %s/Install Certificates.command\"\n"
+            "If that file does not exist: python3 -m pip install --upgrade certifi, then "
+            "export SSL_CERT_FILE=\"$(python3 -m certifi)\" (add that line to ~/.zshrc to keep it).\n"
+            "Do not turn certificate checks off: they are what stop a fake Zerodha from taking your login." % ver)
 
 
 def _sleep(s):
