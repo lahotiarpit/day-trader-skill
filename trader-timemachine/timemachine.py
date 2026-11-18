@@ -928,6 +928,143 @@ def cmd_chart(a):
     return 0
 
 
+# ---------------------------------------------------------------- overnight (buy today, sell tomorrow)
+
+# one option lot, in units, for the rough rupee figure (--lot overrides; NSE / BSE change these)
+LOT_UNITS = {"^NSEI": 65, "^NSEBANK": 30, "^BSESN": 20}
+RULES = (("buy", "buy every night (a call)"), ("sell", "sell every night (a put)"),
+         ("follow", "follow the day (up day: call, down day: put)"),
+         ("fade", "fade the day (up day: put, down day: call)"))
+
+
+def bar_slot(hhmm, what):
+    """"15:15" -> the slot of the bar that CLOSES at 15:15 (it starts at 15:10)."""
+    m = parse_clock(hhmm, what) - 5 - OPEN_MIN
+    if m < 0 or m % 5 or m // 5 >= SESSION_BARS:
+        raise TMError("%s %s is not a 5-minute bar close inside the session (%s to %s)"
+                      % (what, hhmm, clock24(OPEN_MIN + 5), clock24(OPEN_MIN + SESSION_BARS * 5)))
+    return m // 5
+
+
+def _stats(xs):
+    n = len(xs)
+    if not n:
+        return None
+    mean = sum(xs) / float(n)
+    sd = (sum((x - mean) ** 2 for x in xs) / (n - 1)) ** 0.5 if n > 1 else 0.0
+    srt = sorted(xs)
+    med = srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2.0
+    return {"n": n, "mean": mean, "median": med, "sd": sd, "t": (mean / (sd / n ** 0.5)) if sd else 0.0,
+            "win": sum(1 for x in xs if x > 0) / float(n), "worst": srt[0], "best": srt[-1]}
+
+
+def overnight(text, sym, now_utc, entry="15:15", exit_at="09:30", lot=None, delta=0.5):
+    """Every pair of back-to-back sessions in the data: in at the entry bar's close, out at the
+    next session's exit (its open, or the close of the bar ending at exit_at)."""
+    meta, bars, dropped = parse_bars(chart_result(text, sym), now_utc)
+    days = split_sessions(bars)
+    k_in = bar_slot(entry, "--entry")
+    if exit_at == "open":
+        k_out, out_label = 0, "the open (%s)" % clock24(OPEN_MIN)
+    else:
+        k_out, out_label = bar_slot(exit_at, "--exit"), exit_at
+    dates = sorted(days)
+    nights, skipped = [], []
+    for d0, d1 in zip(dates, dates[1:]):
+        a, b = days[d0], days[d1]
+        if k_in not in a or 0 not in b or k_out not in b:
+            skipped.append(d0)
+            continue
+        e = a[k_in]["c"]
+        x = b[0]["o"] if exit_at == "open" else b[k_out]["c"]
+        day_open = a[0]["o"] if 0 in a else e
+        nights.append({"date": d0, "next": d1, "entry": e, "exit": x, "gap": b[0]["o"] - e,
+                       "move": x - e, "move_pct": 100.0 * (x - e) / e, "day": "up" if e >= day_open else "down"})
+    if len(nights) < MIN_SESSIONS:
+        raise TMError("only %d full nights in the data (it needs %d): try again with more history"
+                      % (len(nights), MIN_SESSIONS))
+    rules = {}
+    for key, _ in RULES:
+        pts = []
+        for nt in nights:
+            long = key == "buy" or (key == "follow" and nt["day"] == "up") or (key == "fade" and nt["day"] == "down")
+            pts.append(nt["move"] if long else -nt["move"])
+        rules[key] = _stats(pts)
+    gaps = [abs(n["gap"]) for n in nights]
+    lot = lot or LOT_UNITS.get(sym.upper())
+    today = to_eastern(now_utc).date().isoformat()
+    tonight = None
+    if today in days and 0 in days[today]:
+        last = days[today][max(days[today])]
+        tonight = {"date": today, "open": days[today][0]["o"], "last": last["c"], "last_bar": last["start"],
+                   "day": "up" if last["c"] >= days[today][0]["o"] else "down", "entry_bar_done": k_in in days[today]}
+    return {"symbol": sym.upper(), "entry": entry, "exit": out_label, "nights": nights, "skipped": skipped,
+            "first": nights[0]["date"], "last": nights[-1]["next"], "rules": rules,
+            "gap_mean": sum(gaps) / len(gaps), "gap_max": max(gaps),
+            "gap_pct_mean": 100.0 * sum(abs(n["gap"]) / n["entry"] for n in nights) / len(nights),
+            "lot": lot, "delta": delta, "tonight": tonight}
+
+
+def overnight_report(o):
+    L = ["Overnight replay: %s, in at %s, out at %s the next session." % (o["symbol"], o["entry"], o["exit"]),
+         "%d nights from %s to %s, from its own 5-minute bars (%d skipped: a missing bar)."
+         % (len(o["nights"]), o["first"], o["last"], len(o["skipped"])), ""]
+    L.append("  %-46s %6s %8s %8s %8s %9s" % ("rule", "right", "average", "median", "worst", "best"))
+    for key, name in RULES:
+        r = o["rules"][key]
+        L.append("  %-46s %5.0f%% %+8.1f %+8.1f %+8.1f %+9.1f" % (name, 100 * r["win"], r["mean"], r["median"],
+                                                               r["worst"], r["best"]))
+    L.append("  (index points a night; \"right\" = the nights it moved your way)")
+    L.append("")
+    L.append("Opening gaps: %.1f points on an average night (%.2f%%), %.1f at the largest. A stop cannot act "
+             "before the open: the gap is what you take." % (o["gap_mean"], o["gap_pct_mean"], o["gap_max"]))
+    best = max(RULES, key=lambda kv: o["rules"][kv[0]]["t"])
+    r = o["rules"][best[0]]
+    if abs(r["t"]) < 2:
+        L.append("No clear edge: the best rule (%s) averaged %+.1f points a night, inside the night-to-night noise "
+                 "(t = %.1f; under 2 is what chance alone often does)." % (best[1], r["mean"], r["t"]))
+    else:
+        L.append("The best rule (%s) averaged %+.1f points a night, beyond the usual noise (t = %.1f). Over %d "
+                 "nights that can still be luck: watch it on new nights before trusting it."
+                 % (best[1], r["mean"], r["t"], r["n"]))
+    if o["lot"]:
+        per = o["delta"] * o["lot"]
+        L.append("Rough option figure: an at-the-money option moves about %.1f of the index's points, so one lot "
+                 "(%d) gains or loses about %.0f rupees a point: the average night above is %+.0f, the worst %+.0f, "
+                 "before the overnight time decay that every option buyer pays." % (
+                     o["delta"], o["lot"], per, per * r["mean"], per * r["worst"]))
+    t = o.get("tonight")
+    if t:
+        L.append("")
+        L.append("Today so far: %s, opened %.2f, last %.2f (%s bar): a%s day, so \"follow\" would pick a %s and "
+                 "\"fade\" a %s.%s" % (t["date"], t["open"], t["last"], t["last_bar"],
+                                        "n up" if t["day"] == "up" else " down",
+                                        "call" if t["day"] == "up" else "put", "put" if t["day"] == "up" else "call",
+                                        "" if t["entry_bar_done"] else " The %s bar has not closed yet." % o["entry"]))
+    L.append("A replay of the past, not a prediction. Holding overnight sits outside this pack's day-trade "
+             "rules (flat by the close).")
+    return L
+
+
+def cmd_overnight(a):
+    sym = (a.symbol or "").strip()
+    if not sym:
+        raise TMError("say which index or stock: --symbol ^NSEI")
+    now = parse_now(a.now)
+    text = read_offline(a.offline, sym) if a.offline else fetch_chart(sym)
+    o = overnight(text, sym, now, a.entry_at, a.exit_at, a.lot, a.delta)
+    if a.json:
+        print(json.dumps(dict(o, nights=o["nights"] if a.show else len(o["nights"])), indent=2))
+        return 0
+    print("\n".join(overnight_report(o)))
+    if a.show:
+        print("")
+        for n in o["nights"][-a.show:]:
+            print("  %s -> %s  %10.2f -> %10.2f  gap %+8.2f  move %+8.2f (%+.2f%%)  %s day"
+                  % (n["date"], n["next"], n["entry"], n["exit"], n["gap"], n["move"], n["move_pct"], n["day"]))
+    return 0
+
+
 def main(argv=None):
     argv = market.setup(globals(), argv)
     ap = argparse.ArgumentParser(description="Time Machine: replay a planned day trade (trader-timemachine).")
@@ -961,12 +1098,24 @@ def main(argv=None):
     common(p)
     p.add_argument("--from", dest="from_file", nargs="?", const="trader/timemachine.json", metavar="PATH",
                    help="draw a saved result instead of running again")
+    p = sub.add_parser("overnight", help="buy today, sell tomorrow: replay every night in the data")
+    p.add_argument("--symbol", required=True, help="e.g. ^NSEI (NIFTY) or ^BSESN (SENSEX)")
+    p.add_argument("--entry", dest="entry_at", default=None, help="in at this bar close (default 15:15 India, 15:55 US)")
+    p.add_argument("--exit", dest="exit_at", default="09:30", help="out at this bar close next session, or open")
+    p.add_argument("--lot", type=int, help="units in one option lot, for the rough rupee figure")
+    p.add_argument("--delta", type=float, default=0.5, help="how much of the index's move the option takes (0.5 ATM)")
+    p.add_argument("--show", type=int, default=0, help="list the last N nights")
+    p.add_argument("--offline", metavar="FILE", help="a saved Yahoo chart JSON, no network")
+    p.add_argument("--now")
+    p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
+    if a.cmd == "overnight" and not a.entry_at:
+        a.entry_at = clock24(OPEN_MIN + SESSION_BARS * 5) if globals().get("MARKET") == "IN" else "15:55"
     try:
-        return {"run": cmd_run, "chart": cmd_chart}[a.cmd](a)
+        return {"run": cmd_run, "chart": cmd_chart, "overnight": cmd_overnight}[a.cmd](a)
     except TMError as e:
         print("timemachine.py: %s" % e, file=sys.stderr)
         return 1

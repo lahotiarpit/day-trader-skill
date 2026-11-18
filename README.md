@@ -191,7 +191,11 @@ expiry day; the stop goes in as a stop-limit after the fill. Off until you set
 
 SENSEX works the same way (`entry.py check ^BSESN`): its options trade on BSE's F&O
 segment (BFO), in 20-unit lots with 100-point strikes and Thursday weeklies, and the
-tools route them there by themselves. Yahoo's SENSEX bars can run about 15 minutes
+tools route them there by themselves.
+
+Buy today, sell tomorrow? Test it first: `timemachine.py overnight --symbol ^NSEI --market IN`
+replays every night in the last 60 days (in at 15:15, out at 9:30) for four simple rules
+and shows the opening gaps. Holding overnight is still outside the day-trade rules. Yahoo's SENSEX bars can run about 15 minutes
 late: use `--data kite` for live ones.
 
 Not yet for India: the budget and risk money rules (amounts are plain numbers,

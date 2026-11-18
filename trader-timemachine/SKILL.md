@@ -201,6 +201,30 @@ It reads data and never places an order.
 - On screen, "Yahoo" reads "Zerodha Kite". A failed login or an expired session
   is one plain line that says to log in again.
 
+## Overnight: buy today, sell tomorrow (timemachine.py overnight)
+
+```bash
+python3 timemachine.py overnight --symbol ^NSEI --market IN            # in at 15:15, out at 9:30 next session
+python3 timemachine.py overnight --symbol ^BSESN --market IN --exit open --show 10
+```
+
+A test, not a trade. It takes every pair of back-to-back sessions in the stock's or index's own
+last 60 days of 5-minute bars (about 40 to 60 nights), goes in at the close of the `--entry` bar
+(15:15 in India, 15:55 in New York) and out at the next session's `--exit` (a bar close, or
+`open`), and scores four rules: buy every night (a call), sell every night (a put), follow the
+day (up day: call, down day: put) and fade it. For each: how often it was right, the average,
+median, worst and best night in index points, and t (the average over its noise; under 2 is
+"no clear edge"). It also prints the opening gaps (a stop cannot act before the open, so the gap
+is what you take) and a rough rupee figure per option lot: an at-the-money option takes about
+half the index's points (`--delta 0.5`, `--lot` to override 65 for NIFTY, 20 for SENSEX), BEFORE
+the overnight time decay every option buyer pays. Option prices themselves are not replayed:
+Zerodha keeps no history of expired contracts.
+
+Overnight holding sits outside this pack's day-trade rules (flat by the close): the risk check
+and the tickets still say so. A rule that shows an edge here should be watched on new nights
+before money goes on it; 60 nights in one market mood (a rising month makes "buy every night"
+look good) prove little.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
