@@ -732,6 +732,10 @@ def cmd_show(a):
 
 OPTION_DEFAULTS = {"option_stop_pct": 30, "option_target": "2R", "option_strike": "atm",
                    "option_expiry_switch": "13:30", "option_flat_by": "15:00"}
+# where an index's options trade (kite.py's option_exchange says the same; this copy
+# works without kite.py, for --contract)
+OPTION_EXCHANGE = {"^BSESN": "BFO"}
+INDEX_NAMES = {"^NSEI": "NIFTY", "^NSEBANK": "BANK NIFTY", "^CNXFIN": "FIN NIFTY", "^BSESN": "SENSEX"}
 OPTION_NOTE = ("Options can lose everything you pay. A stop on an option is a stop-limit (SL): in a fast "
                "market it may not fill at all.")
 
@@ -759,13 +763,16 @@ def option_contract(a, plan, now_local, cfg):
             raise PlanError("the plan is a %s, so it wants a %s, but %s is not one"
                             % ("breakdown" if kind == "PE" else "breakout", "put (PE)" if kind == "PE" else
                                "call (CE)", sym))
-        return {"tradingsymbol": sym, "exchange": "NFO", "expiry": a.expiry, "strike": float(a.strike_price),
+        exchange = (a.exchange or OPTION_EXCHANGE.get(str(plan["symbol"]).upper(), "NFO")).upper()
+        if exchange not in ("NFO", "BFO"):
+            raise PlanError("--exchange is NFO (NSE options) or BFO (BSE options, like SENSEX)")
+        return {"tradingsymbol": sym, "exchange": exchange, "expiry": a.expiry, "strike": float(a.strike_price),
                 "type": kind, "lot_size": int(a.lot_size), "tick_size": float(a.tick or 0.05),
                 "expiry_note": "from the flags", "source": "flags"}, spot
     try:
         import kite
         root = kite.option_root(plan["symbol"])
-        chain = kite.option_chain(root)
+        chain = kite.option_chain(root, a.exchange.upper() if a.exchange else kite.option_exchange(plan["symbol"]))
         expiry, why = kite.pick_expiry(chain, now_local, switch)
         row = kite.pick_strike(chain, expiry, kind, spot, a.strike)
     except ImportError:
@@ -778,7 +785,7 @@ def option_contract(a, plan, now_local, cfg):
 
 def build_option_plan(a, now_utc):
     if globals().get("MARKET") != "IN":
-        raise PlanError("options here are NSE (NFO) options: run with --market IN")
+        raise PlanError("options here are India's (NFO / BFO): run with --market IN")
     plan = read_json(a.plan, "plan (run exit.py plan --write on the index first)")
     for k in ("symbol", "entry", "stop", "target"):
         if plan.get(k) is None:
@@ -796,7 +803,8 @@ def build_option_plan(a, now_utc):
     else:
         try:
             import kite
-            prem = kite.ltp(["NFO:" + sym]).get("NFO:" + sym)
+            key = "%s:%s" % (c.get("exchange", "NFO"), sym)
+            prem = kite.ltp([key]).get(key)
         except Exception as e:
             raise PlanError("could not read %s's price from Zerodha: %s. Give it with --premium"
                             % (sym, str(e).rstrip(".")))
@@ -851,11 +859,14 @@ def build_option_plan(a, now_utc):
 
 def describe_option(o):
     up = o["direction"] == "up"
-    out = ["Option plan: BUY %s %s, %s %s, %s" % (
-        o["symbol"], "(a call: NIFTY broke out)" if up and o["underlying"] == "^NSEI" else
-        "(a put: NIFTY broke down)" if o["underlying"] == "^NSEI" else
-        "(a call on the breakout)" if up else "(a put on the breakdown)",
-        num(o["strike"]), o["option_type"], o["expiry"] + (" (expires TODAY)" if o["expiry_day"] else ""))]
+    name = INDEX_NAMES.get(str(o["underlying"]).upper())
+    if name:
+        why = "(a call: %s broke out)" % name if up else "(a put: %s broke down)" % name
+    else:
+        why = "(a call on the breakout)" if up else "(a put on the breakdown)"
+    out = ["Option plan: BUY %s %s, %s %s, %s, %s" % (
+        o["symbol"], why, num(o["strike"]), o["option_type"], o["expiry"] + (" (expires TODAY)" if o["expiry_day"] else ""),
+        o.get("exchange", "NFO"))]
     if o["strike_choice"] == "flags":
         out.append("  Why this one  your contract (the index was at %s)" % money(o["spot"]))
     else:
@@ -935,6 +946,8 @@ def main(argv=None):
     p.add_argument("--strike-price", type=float, help="with --contract")
     p.add_argument("--lot-size", type=int, help="with --contract")
     p.add_argument("--tick", type=float, help="with --contract: price step (default 0.05)")
+    p.add_argument("--exchange", choices=["NFO", "BFO", "nfo", "bfo"],
+                   help="NFO (NSE options) or BFO (BSE: SENSEX). Default: from the index (^BSESN is BFO)")
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--now", help='pretend it is this time, e.g. "2026-11-18 10:00"')
     p.add_argument("--write", nargs="?", const="trader/option_plan.json", metavar="PATH",

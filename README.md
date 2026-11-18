@@ -179,7 +179,7 @@ python3 trader-entry/entry.py check SBIN --setup orb --market IN
   after the entry fills (`ticket.py protect`), and the target is watched by
   trader-alerts. See trader-broker's SKILL.md, Setup C.
 
-### NIFTY options
+### NIFTY and SENSEX options
 
 The skills read the **index** for the signal and buy **one option** for the trade: a breakout
 (`entry.py check ^NSEI`) buys a call, a breakdown (`--side sell`) a put. `exit.py option` picks
@@ -188,6 +188,11 @@ stop 30% under the price paid and a 2R target. `size.py --option` sizes it in wh
 max loss. trader-risk keeps it buy-only, whole lots, `max_lots`, and no new entries late on
 expiry day; the stop goes in as a stop-limit after the fill. Off until you set
 `"allow_options": true`. Options can lose everything you pay.
+
+SENSEX works the same way (`entry.py check ^BSESN`): its options trade on BSE's F&O
+segment (BFO), in 20-unit lots with 100-point strikes and Thursday weeklies, and the
+tools route them there by themselves. Yahoo's SENSEX bars can run about 15 minutes
+late: use `--data kite` for live ones.
 
 Not yet for India: the budget and risk money rules (amounts are plain numbers,
 with no Indian trading costs), the news and analyst skills (SEC filings) and the

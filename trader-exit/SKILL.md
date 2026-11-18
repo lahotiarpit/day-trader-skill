@@ -9,7 +9,7 @@ description: >-
   above the entry, a target at or below it, or a stop too tight to survive the
   spread, and says why. Writes trader/plan.json for the Time Machine, the
   Budget Manager and Price Alerts. Long side; a breakdown's mirror levels for
-  an index put. On NSE, `exit.py option` turns a NIFTY / BANKNIFTY plan into
+  an index put. In India, `exit.py option` turns a NIFTY / BANKNIFTY / SENSEX plan into
   one option to buy: a call on a breakout, a put on a breakdown, ATM strike,
   nearest expiry (the next after 13:30 on expiry day), stop 30% under the
   price paid, 2R target. Use when the user says "where's my stop", "set my
@@ -192,6 +192,11 @@ Without kite.py (no Kite login on this computer), give the contract yourself:
 `exit.py option --contract NIFTY26N2325250PE --expiry 2026-11-23 --strike-price 25250
 --lot-size 65 --premium 112.35`. In a chat with the Kite connector, Claude can read those from
 its option chain and quote.
+
+**SENSEX** (`^BSESN`): its options trade on BFO (BSE's F&O segment), 20-unit lots, 100-point
+strikes, Thursday weeklies. `exit.py option` sends a SENSEX plan there by itself (`--exchange BFO`
+to say so with `--contract`), and the ticket, sizing and risk check follow the plan's exchange.
+Yahoo's SENSEX bars can lag about 15 minutes: `--data kite` gives live ones.
 
 Config: `option_stop_pct` (30), `option_target` ("2R"), `option_expiry_switch` ("13:30"),
 `option_flat_by` on expiry day ("15:00").
