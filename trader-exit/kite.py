@@ -378,8 +378,11 @@ def yahoo_get(path, now=None):
 
 # ---------------------------------------------------------------- options (NFO): read only
 
-# Yahoo index ticker -> the name Zerodha's NFO list gives its options
-UNDERLYINGS = {"^NSEI": "NIFTY", "^NSEBANK": "BANKNIFTY", "^CNXFIN": "FINNIFTY", "^NSEMDCP50": "MIDCPNIFTY"}
+# Yahoo index ticker -> the name Zerodha's option list gives its options. NSE's index
+# options trade on NFO, BSE's (SENSEX: 20-unit lots, Thursday weeklies) on BFO.
+UNDERLYINGS = {"^NSEI": "NIFTY", "^NSEBANK": "BANKNIFTY", "^CNXFIN": "FINNIFTY", "^NSEMDCP50": "MIDCPNIFTY",
+               "^BSESN": "SENSEX"}
+OPTION_EXCHANGES = {"SENSEX": "BFO", "BANKEX": "BFO"}
 EXPIRY_SWITCH = "13:30"     # on expiry day, after this time use the next expiry
 
 
@@ -393,8 +396,19 @@ def option_root(ysym):
     return split_symbol(s)[1]
 
 
+def option_exchange(ysym):
+    """Where an underlying's options trade: BFO for SENSEX (and .BO stocks), else NFO."""
+    s = urllib.parse.unquote(str(ysym)).strip().upper()
+    if s.endswith(".BO"):
+        return "BFO"
+    try:
+        return OPTION_EXCHANGES.get(option_root(s), "NFO")
+    except KiteError:
+        return "NFO"
+
+
 def parse_options(text, root, exchange="NFO"):
-    """Zerodha's NFO instruments CSV -> option rows of one underlying."""
+    """Zerodha's NFO or BFO instruments CSV -> option rows of one underlying."""
     out = []
     for row in csv.DictReader(io.StringIO(text)):
         if row.get("exchange") != exchange or (row.get("name") or "").upper() != root:

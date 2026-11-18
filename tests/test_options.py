@@ -298,5 +298,78 @@ class Tickets(Workdir):
         self.assertNotIn("market_protection", k)
 
 
+def bfo_rows():
+    rows = []
+    for k in range(82000, 82701, 100):
+        for t in ("CE", "PE"):
+            rows.append("%d,1,SENSEX26N19%d%s,SENSEX,0,2026-11-19,%d,0.05,20,%s,BFO-OPT,BFO" % (210000000 + k, k, t, k, t))
+            rows.append("%d,1,SENSEX26N26%d%s,SENSEX,0,2026-11-26,%d,0.05,20,%s,BFO-OPT,BFO" % (220000000 + k, k, t, k, t))
+    return HEAD + "\n".join(rows) + "\n"
+
+
+class Sensex(Workdir):
+    """SENSEX options trade on BSE's F&O segment (BFO): 20-unit lots, 100-point strikes,
+    Thursday weeklies (checked against Kite's option chain on 2026-11-18)."""
+
+    def sensex_plan(self):
+        code, _, err = self.run_tool(EXIT, ["plan", "--symbol", "^BSESN", "--market", "IN", "--side", "sell",
+                                            "--entry", "82186.05", "--or-high", "82578.87", "--or-low", "82212.29",
+                                            "--date", "2026-11-18", "--time", "9:40 AM", "--now", "2026-11-18 10:15",
+                                            "--write"])
+        self.assertEqual(code, 0, err)
+
+    def test_sensex_is_a_bfo_underlying(self):
+        self.assertEqual(kite.option_root("^BSESN"), "SENSEX")
+        self.assertEqual(kite.option_exchange("^BSESN"), "BFO")
+        self.assertEqual(kite.option_exchange("^NSEI"), "NFO")
+        self.assertEqual(kite.option_exchange("RELIANCE.NS"), "NFO")
+        chain = kite.parse_options(bfo_rows(), "SENSEX", "BFO")
+        self.assertTrue(chain and all(r["exchange"] == "BFO" and r["lot_size"] == 20 for r in chain))
+        self.assertEqual(kite.parse_options(bfo_rows(), "SENSEX", "NFO"), [])
+        self.assertEqual(kite.pick_strike(chain, "2026-11-19", "PE", 82323)["tradingsymbol"], "SENSEX26N1982300PE")
+        self.assertEqual(kite.pick_expiry(chain, ist(2026, 11, 19, 13, 45))[0], "2026-11-26")
+
+    def test_a_sensex_put_from_the_flags_goes_to_bfo(self):
+        self.sensex_plan()
+        code, out, err = self.run_tool(EXIT, ["option", "--market", "IN", "--now", "2026-11-18 10:15",
+                                              "--contract", "SENSEX26N1982300PE", "--expiry", "2026-11-19",
+                                              "--strike-price", "82300", "--lot-size", "20", "--premium", "375.65",
+                                              "--write"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("a put: SENSEX broke down", out)
+        with open("trader/option_plan.json") as fh:
+            o = json.load(fh)
+        self.assertEqual((o["exchange"], o["lot_size"], o["stop"], o["risk_per_lot"]), ("BFO", 20, 262.95, 2254.0))
+        s = SIZE.size_option(o, dict(CFG, max_loss_per_trade_usd=3000), today="2026-11-18")
+        order = SIZE.option_order(s)
+        self.assertEqual((order["exchange"], order["qty"]), ("BFO", "20"))
+        k = TICKET.kite_input(order, CFG)
+        self.assertEqual((k["exchange"], k["tradingsymbol"], k["quantity"]), ("BFO", "SENSEX26N1982300PE", 20))
+        self.assertIsNone(TICKET.zerodha_problem(order, CFG))
+
+    def test_a_sensex_put_from_the_option_list(self):
+        self.sensex_plan()
+        kite._CHAINS[("BFO", "SENSEX")] = kite.parse_options(bfo_rows(), "SENSEX", "BFO")
+        orig, seen = kite.ltp, []
+        kite.ltp = lambda instruments: seen.extend(instruments) or {i: 375.65 for i in instruments}
+        try:
+            code, out, err = self.run_tool(EXIT, ["option", "--market", "IN", "--now", "2026-11-18 10:15",
+                                                  "--spot", "82323", "--json"])
+        finally:
+            kite.ltp = orig
+            kite._CHAINS.clear()
+        self.assertEqual(code, 0, err)
+        o = json.loads(out)
+        self.assertEqual((o["symbol"], o["exchange"], o["expiry"]), ("SENSEX26N1982300PE", "BFO", "2026-11-19"))
+        self.assertEqual(seen, ["BFO:SENSEX26N1982300PE"])
+
+    def test_risk_reads_bfo_as_an_option(self):
+        CHECK.market.apply(vars(CHECK), "IN")
+        order = {"symbol": "SENSEX26N1982300PE", "exchange": "BFO", "side": "sell", "qty": "20", "type": "limit",
+                 "limit_price": "375.65", "time_in_force": "day"}
+        r = CHECK.check([order], CFG, portfolio={"cash": 19000, "positions": []}, now=UTC_1005)["results"][0]
+        self.assertIn("only buys options", " ".join(r["reasons"]))
+
+
 if __name__ == "__main__":
     unittest.main()
