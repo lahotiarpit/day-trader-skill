@@ -201,6 +201,27 @@ def trading_day(d):
     return True, ""
 
 
+# per-index loss cap for options, rupees per lot: {"NIFTY": 1300, "SENSEX": 800}
+UNDERLYING_ALIASES = {"NIFTY": "^NSEI", "NIFTY50": "^NSEI", "NIFTY 50": "^NSEI", "BANKNIFTY": "^NSEBANK",
+                      "SENSEX": "^BSESN", "FINNIFTY": "^CNXFIN"}
+
+
+def lot_loss_cap(cfg, underlying):
+    """The option_max_loss_per_lot entry for this underlying (^NSEI or NIFTY both work), or None."""
+    caps = (cfg or {}).get("option_max_loss_per_lot")
+    if not isinstance(caps, dict) or not underlying:
+        return None
+    want = str(underlying).strip().upper()
+    for k, v in caps.items():
+        key = str(k).strip().upper()
+        if UNDERLYING_ALIASES.get(key, key) == want or key == want:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def hhmm(value, key):
     """"09:45" -> time(9, 45); None or "" -> None (that bound is off)."""
     if value in (None, "", False):
@@ -630,7 +651,14 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     shares = q if q is not None else ((value or 0) / ref)
                     max_loss = round(shares * risk_ps, 2)
                     cap = _f(c.get("max_loss_per_trade_usd"))
-                    if cap and max_loss > cap + CENT:
+                    per_lot = lot_loss_cap(c, (opt or {}).get("underlying")) if is_opt else None
+                    lot_n = int(_f((opt or {}).get("lot_size")) or 0)
+                    if per_lot is not None and lot_n:
+                        lot_loss = round(lot_n * risk_ps, 2)
+                        if lot_loss > per_lot + CENT:
+                            later.append("loss: %d units x %s = %s at the stop a lot, over your %s cap a lot for %s"
+                                         % (lot_n, _p(risk_ps), money(lot_loss), money(per_lot), opt.get("underlying")))
+                    elif cap and max_loss > cap + CENT:
                         later.append("loss: %s shares x %s risk a share = %s at the stop, over your %s max loss "
                                      "per trade" % (_num(shares), _p(risk_ps), money(max_loss), money(cap)))
                     min_rr = _f(c.get("min_reward_risk"))
@@ -666,8 +694,10 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 info.append("entry %s (%s), stop %s, target %s: risk %s a share"
                             % (_p(ref), REF_WORDS.get(ref_from, ref_from), _p(stop),
                                _p(target) if target else "none", _p(risk_ps)))
+                lot_cap = lot_loss_cap(c, (opt or {}).get("underlying")) if is_opt else None
                 info.append("max loss %s%s, reward:risk %s%s"
-                            % (money(max_loss), (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
+                            % (money(max_loss), (" (cap %s a lot for %s)" % (money(lot_cap), opt.get("underlying")))
+                               if lot_cap is not None else (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
                                if _f(c.get("max_loss_per_trade_usd")) else "",
                                ("%.2f" % rr) if rr is not None else "n/a",
                                (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))

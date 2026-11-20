@@ -772,6 +772,27 @@ def write_orders(path, orders, cfg, source="", now_utc=None):
 
 # ---------------------------------------------------------------- option mode (NSE: whole lots)
 
+# per-index loss cap for options, rupees per lot: {"NIFTY": 1300, "SENSEX": 800}
+UNDERLYING_ALIASES = {"NIFTY": "^NSEI", "NIFTY50": "^NSEI", "NIFTY 50": "^NSEI", "BANKNIFTY": "^NSEBANK",
+                      "SENSEX": "^BSESN", "FINNIFTY": "^CNXFIN"}
+
+
+def lot_loss_cap(cfg, underlying):
+    """The option_max_loss_per_lot entry for this underlying (^NSEI or NIFTY both work), or None."""
+    caps = (cfg or {}).get("option_max_loss_per_lot")
+    if not isinstance(caps, dict) or not underlying:
+        return None
+    want = str(underlying).strip().upper()
+    for k, v in caps.items():
+        key = str(k).strip().upper()
+        if UNDERLYING_ALIASES.get(key, key) == want or key == want:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def size_option(op, cfg, cash=None, today=None):
     """Pure function: an option plan (trader-exit option) + your rules -> lots (may be 0).
     The loss at the stop is (entry - stop) x lot size x lots; buying options only."""
@@ -806,11 +827,18 @@ def size_option(op, cfg, cash=None, today=None):
     risk_lot = round((entry - stop) * lot, 2)
     cost_lot = round(entry * lot, 2)
     limits = []
+    max_lots = int(_f(c.get("max_lots")) or 2)
+    per_lot = lot_loss_cap(c, op.get("underlying"))
     max_loss = _f(c.get("max_loss_per_trade_usd"))
-    if max_loss:
+    if per_lot is not None:
+        # this index has its own cap per lot: it replaces the per-trade max loss for its options
+        max_loss = per_lot * max_lots
+        limits.append({"name": "max loss per lot", "lots": max_lots if risk_lot <= per_lot + 0.005 else 0,
+                       "how": "%s at the stop a lot, your %s cap for %s" % (money(risk_lot), money(per_lot),
+                                                                         op.get("underlying"))})
+    elif max_loss:
         limits.append({"name": "max loss", "lots": int(math.floor(max_loss / risk_lot + EPS)),
                        "how": "%s max loss / %s a lot at the stop" % (money(max_loss), money(risk_lot))})
-    max_lots = int(_f(c.get("max_lots")) or 2)
     limits.append({"name": "max lots", "lots": max_lots, "how": "your max_lots %d" % max_lots})
     cap_pct = _f(c.get("max_position_pct"))
     if cap_pct:
@@ -827,7 +855,14 @@ def size_option(op, cfg, cash=None, today=None):
     bound = [l["name"] for l in limits if l["lots"] == lots][0]
     refusal = None
     if lots == 0:
-        if bound == "max loss":
+        if bound == "max loss per lot":
+            pct = round(100.0 * per_lot / (entry * lot), 1) if entry else 0
+            refusal = ("one lot (%d units) loses %s at the stop %s, more than your %s cap a lot for %s. No order. "
+                       "Skip it, or plan a tighter stop (about %s%% would fit: exit.py option --stop-pct %s), "
+                       "or a cheaper strike (--strike otm1)." % (lot, money(risk_lot), _price(stop), money(per_lot),
+                                                                 op.get("underlying"), _num(pct),
+                                                                 _num(max(1, math.floor(pct)))))
+        elif bound == "max loss":
             pct = round(100.0 * max_loss / (entry * lot), 1) if entry else 0
             refusal = ("one lot (%d units) loses %s at the stop %s, more than your %s max loss per trade. No order. "
                        "Skip it, or plan a tighter stop (about %s%% would fit: exit.py option --stop-pct %s), "
