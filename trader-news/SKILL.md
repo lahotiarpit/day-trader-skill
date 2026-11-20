@@ -10,6 +10,9 @@ description: >-
   the user says "any news on TSLA", "why is this moving", "what's the news on
   my watchlist", "morning briefing", "pre-market news", "monitor the news",
   "did anything break", "check the 8-Ks", or after /trader-scanner finds setups.
+  For Indian stocks (UGROCAP.NS, or --market IN) it reads NSE's corporate
+  announcements instead of SEC filings: results, board meetings, fund raises,
+  deals, rating changes, resignations, in IST.
 argument-hint: "[tickers]"
 ---
 
@@ -96,6 +99,36 @@ ticker has no news, say so rather than padding the brief.
   headline.
 - Never hammers a server: one request per feed per ticker, a pause between
   calls, and SEC's 10 requests a second limit stays far away.
+
+## India (NSE announcements)
+
+```bash
+python3 news.py --tickers UGROCAP PAYTM --market IN        # bare NSE symbols
+python3 news.py --tickers UGROCAP.NS --hours 168
+python3 news.py --tickers PAYTM.NS --nse-file ~/Downloads/paytm.json   # older ones, saved from a browser
+```
+
+Indian companies announce what moves a price on the exchange, not to the SEC, and Yahoo's
+headline feed carries little for smaller Indian stocks. For a ticker ending `.NS` (or a bare one
+with `--market IN`, `"market": "IN"` in the config, or `TRADER_MARKET=IN`) the tool reads:
+
+- **NSE's announcements RSS** (`nsearchives.nseindia.com/content/RSS/Online_announcements.xml`):
+  every company's filings of the day. A row belongs to your ticker when its description starts
+  with `SYMBOL :`, its file is named `SYMBOL_...`, or its title is the company's name (from NSE's
+  equity list, `EQUITY_L.csv`, read once a day).
+- **NSE's per-company list** (`www.nseindia.com/api/corporate-announcements?index=equities&symbol=X`),
+  older announcements too, when NSE lets a script in (it wants a browser visit first, and often
+  refuses). When it does not, one note says so; open that URL in a browser, save it, and pass
+  `--nse-file FILE`.
+
+Each becomes an "NSE filing" with a link to the PDF. `!` marks the subjects that can move a
+price: financial results, board meeting outcomes, fund raises (preferential, QIP, rights,
+allotment), acquisitions, mergers and schemes, credit ratings, director, KMP and auditor
+changes, defaults, insolvency, pledges, open offers, buybacks, large orders, penalties. SEC is
+skipped for Indian tickers, and times print in IST. The price line reads Yahoo's `.NS` chart.
+
+Read the PDF before saying what an announcement means: the subject line is a lead, the filing
+is the fact.
 
 ## Safety
 

@@ -34,6 +34,20 @@ what you have seen (30 days), so an item shows once. Offline: --offline DIR
 reads yahoo-<TICKER>.xml, chart-<TICKER>.json, sec-<FORM>-<CIK>.xml and
 company_tickers.json from DIR. The tests use it.
 
+India (NSE): tickers ending .NS, or bare tickers with --market IN (or
+"market": "IN" in trader/config.json), also read NSE's corporate announcements,
+the filings Indian companies must make (results, board meetings, fund raises,
+deals, rating changes, resignations):
+  - NSE's announcements RSS (today's filings, every company):
+    https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml
+  - NSE's per-company announcements (older ones too), when NSE lets a script
+    in; when it does not, the tool says so and --nse-file reads the same JSON
+    saved from a browser:
+    https://www.nseindia.com/api/corporate-announcements?index=equities&symbol=<SYMBOL>
+  - NSE's equity list, to match a company name to its symbol:
+    https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv
+SEC filings are skipped for them. Times print in IST.
+
 Headlines are leads, not facts: open the story before acting, and treat
 nothing here as advice.
 """
@@ -48,6 +62,9 @@ import os
 import re
 import sys
 import time
+import csv
+import http.cookiejar
+import io
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -90,6 +107,220 @@ KEYWORDS = [
 
 class NewsError(Exception):
     pass
+
+
+# ---------------------------------------------------------------- NSE (India)
+
+NSE_RSS = "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"
+NSE_LIST = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+NSE_HOME = "https://www.nseindia.com/"
+NSE_API = "https://www.nseindia.com/api/corporate-announcements?index=equities&symbol=%s"
+NSE_PAGE = "https://www.nseindia.com/companies-listing/corporate-filings-announcements"
+# NSE's servers stall requests that name themselves a script; they answer a browser's string
+NSE_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+          "Chrome/120 Safari/537.36")
+IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+# subjects that can move a price: shown with "!"
+NSE_IMPORTANT = re.compile(
+    r"financial result|outcome of board meeting|board meeting intimation|fund ?rais|preferential|"
+    r"\bqip\b|qualified institution|rights issue|allotment|acquisition|amalgamation|merger|"
+    r"scheme of arrangement|credit rating|resignation|cessation|change in (?:management|control|director)|"
+    r"key managerial|"
+    r"\bdefault\b|insolvency|\bnclt\b|fraud|search|pledge|open offer|delisting|buy ?back|"
+    r"bulk deal|block deal|award of order|receipt of order|bagging|litigation|penalty", re.I)
+NSE_KEYWORDS = [
+    ("earnings", r"financial result|\bresults?\b"),
+    ("capital", r"fund ?rais|preferential|\bqip\b|rights issue|allotment|dividend|buy ?back|warrant"),
+    ("deal", r"acquisition|amalgamation|merger|scheme of arrangement|open offer|award of order|"
+             r"receipt of order|bagging"),
+    ("people", r"resignation|cessation|appointment|change in management"),
+    ("risk", r"credit rating|\bdefault\b|insolvency|\bnclt\b|fraud|pledge|search|penalty|litigation"),
+    ("regulatory", r"sebi|regulation 30|\brbi\b"),
+]
+
+
+def is_indian(t):
+    return t.upper().endswith((".NS", ".BO"))
+
+
+def nse_symbol(t):
+    t = t.upper()
+    return t[:-3] if is_indian(t) else t
+
+
+def _norm_name(name):
+    n = re.sub(r"[^a-z0-9& ]+", " ", (name or "").lower())
+    n = re.sub(r"\b(?:limited|ltd|the|india|pvt|private|co|company|corporation|corp)\b", " ", n)
+    return " ".join(n.split())
+
+
+def parse_nse_list(data):
+    """NSE's EQUITY_L.csv -> {SYMBOL: company name}."""
+    text = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
+    out = {}
+    for row in csv.reader(io.StringIO(text)):
+        if len(row) >= 2 and row[0].strip() and row[0].strip() != "SYMBOL":
+            out[row[0].strip().upper()] = row[1].strip()
+    return out
+
+
+def nse_time(value):
+    """NSE's '20-Nov-2026 12:04:00' (IST), or '2026-11-20 12:04:00', -> aware UTC."""
+    v = (value or "").strip()
+    for fmt in ("%d-%b-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d-%b-%Y %H:%M", "%d%m%Y%H%M%S"):
+        try:
+            return _dt.datetime.strptime(v, fmt).replace(tzinfo=IST).astimezone(_dt.timezone.utc)
+        except ValueError:
+            continue
+    return parse_time(v)
+
+
+def _nse_item(ticker, sym, company, subject, text, link, when, key):
+    title = "%s: %s" % (company or sym, subject or (text or "")[:120])
+    hay = "%s %s" % (subject, text)
+    return {"id": "nse:" + key, "source": "NSE filing", "kind": "filing", "form": "NSE announcement",
+            "ticker": ticker, "title": title.strip(), "summary": text or "", "items": [],
+            "important": bool(NSE_IMPORTANT.search(hay)), "link": link or NSE_PAGE, "time": when}
+
+
+def parse_nse_rss(data, wanted, names):
+    """NSE's announcements RSS -> items for the wanted tickers. A row belongs to a ticker when its
+    description starts with 'SYMBOL :', its file is named SYMBOL_..., or its title is the company."""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise NewsError("NSE announcements RSS is not valid XML: %s" % exc)
+    by_name = {}
+    for t in wanted:
+        n = _norm_name(names.get(nse_symbol(t), ""))
+        if n:
+            by_name[n] = t
+    out = []
+    for it in root.iter("item"):
+        title = _text(it, "title")
+        desc = _text(it, "description")
+        link = _text(it, "link")
+        when = nse_time(_text(it, "pubDate"))
+        m = re.match(r"^\s*([A-Z0-9&\-]{1,20})\s+:\s*(.*)$", desc, re.S)
+        sym_in_desc = m.group(1) if m else ""
+        body = m.group(2) if m else desc
+        fname = link.rsplit("/", 1)[-1].upper() if link else ""
+        hit = None
+        for t in wanted:
+            s = nse_symbol(t)
+            if sym_in_desc == s or (fname and fname.startswith(s + "_")):
+                hit = t
+                break
+        if hit is None:
+            hit = by_name.get(_norm_name(title))
+        if hit is None:
+            continue
+        key = hashlib.sha1(("%s|%s|%s" % (title, desc, _text(it, "pubDate"))).encode("utf-8")).hexdigest()[:16]
+        m2 = re.search(r"informed the Exchange (?:about|regarding|that)\s+(.+?)(?:\.\s|$)", body, re.S)
+        subject = (m2.group(1) if m2 else re.split(r"(?<=[a-z])\.\s", body.strip(), 1)[0]).strip().rstrip(".")[:160]
+        out.append(_nse_item(hit, nse_symbol(hit), title, subject, body.strip(), link, when, key))
+    return out
+
+
+def parse_nse_json(data, ticker):
+    """NSE's corporate-announcements JSON (the live API or a file saved from a browser) -> items."""
+    try:
+        doc = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+    except ValueError:
+        raise NewsError("NSE announcements for %s are not JSON (NSE may have sent a block page)" % ticker)
+    rows = doc.get("data", doc) if isinstance(doc, dict) else doc
+    if not isinstance(rows, list):
+        raise NewsError("NSE announcements for %s are not the shape this tool knows" % ticker)
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("symbol") or nse_symbol(ticker)).upper()
+        if sym != nse_symbol(ticker):
+            continue
+        subject = r.get("desc") or r.get("subject") or ""
+        text = r.get("attchmntText") or r.get("details") or ""
+        when = nse_time(r.get("an_dt") or r.get("sort_date") or r.get("dt") or "")
+        key = str(r.get("seq_id") or hashlib.sha1(json.dumps(r, sort_keys=True).encode()).hexdigest()[:16])
+        out.append(_nse_item(ticker, sym, r.get("sm_name") or sym, subject, text, r.get("attchmntFile"),
+                             when, key))
+    return out
+
+
+def nse_company_json(sym, timeout=20):
+    """NSE's per-company announcements. NSE wants its own cookies first: one visit to the home
+    page, then the API. It often refuses scripts; the caller says so and falls back."""
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    hdr = {"User-Agent": NSE_UA, "Accept": "application/json, text/plain, */*",
+           "Accept-Language": "en-US,en;q=0.9", "Referer": NSE_PAGE}
+    try:
+        opener.open(urllib.request.Request(NSE_HOME, headers=hdr), timeout=timeout).read()
+        with opener.open(urllib.request.Request(NSE_API % urllib.request.quote(sym), headers=hdr),
+                         timeout=timeout) as resp:
+            data = resp.read()
+            if resp.headers.get("Content-Encoding") == "gzip":
+                data = gzip.decompress(data)
+            return data
+    except urllib.error.HTTPError as exc:
+        raise NewsError("HTTP %s" % exc.code)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise NewsError("could not reach www.nseindia.com: %s" % (getattr(exc, "reason", None) or exc or
+                                                                   type(exc).__name__))
+
+
+def nse_names(fetcher, state, today):
+    cache = state.get("nse_names") or {}
+    if cache.get("date") == today and cache.get("names"):
+        return cache["names"]
+    names = parse_nse_list(fetcher.get(NSE_LIST, "nse-EQUITY_L.csv"))
+    state["nse_names"] = {"date": today, "names": names}
+    return names
+
+
+def collect_nse(fetcher, india, state, now, nse_files=(), company_api=True, errors=None):
+    """NSE announcements for the Indian tickers: today's RSS, then each company's own list."""
+    errors = [] if errors is None else errors
+    items = []
+    try:
+        names = nse_names(fetcher, state, now.astimezone(IST).date().isoformat())
+    except NewsError as exc:
+        errors.append("NSE equity list (company names): %s" % exc)
+        names = {}
+    try:
+        items += parse_nse_rss(fetcher.get(NSE_RSS, "nse-announcements.xml"), india, names)
+    except NewsError as exc:
+        if not (fetcher.offline and "no file" in str(exc)):
+            errors.append("NSE announcements RSS: %s" % exc)
+    for path in nse_files or ():
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            errors.append("--nse-file %s: %s" % (path, exc))
+            continue
+        for t in india:
+            try:
+                items += parse_nse_json(data, t)
+            except NewsError as exc:
+                errors.append(str(exc))
+    if company_api and not fetcher.offline and not nse_files:
+        refused, why = [], ""
+        for t in sorted(india):
+            sym = nse_symbol(t)
+            try:
+                items += parse_nse_json(nse_company_json(sym), t)
+            except NewsError as exc:
+                refused.append(sym)
+                why = why or str(exc)
+                if "403" in why or "could not reach" in why:      # the same answer for the rest
+                    refused += [nse_symbol(x) for x in sorted(india) if nse_symbol(x) not in refused]
+                    break
+        if refused:
+            errors.append("NSE's per-company announcements were not reachable (%s), so only today's NSE RSS was "
+                          "read for %s. For older ones: open %s (any symbol) in a browser, save it, and pass "
+                          "--nse-file FILE" % (why, ", ".join(refused), NSE_API % refused[0]))
+    return items
 
 
 # ---------------------------------------------------------------- time
@@ -177,7 +408,8 @@ class Fetcher(object):
         if gap < self.pause:
             time.sleep(self.pause - gap)
         self._last = time.time()
-        headers = {"User-Agent": self.sec_ua if sec else BROWSER_UA, "Accept-Encoding": "gzip"}
+        ua = self.sec_ua if sec else (NSE_UA if "nseindia.com" in url else BROWSER_UA)
+        headers = {"User-Agent": ua, "Accept-Encoding": "gzip"}
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -189,10 +421,15 @@ class Fetcher(object):
             raise NewsError("HTTP %s for %s" % (exc.code, url))
         except urllib.error.URLError as exc:
             raise NewsError("could not reach %s: %s" % (url, exc.reason))
+        except (OSError, TimeoutError) as exc:      # a stalled read: a timeout, a reset
+            raise NewsError("%s did not answer: %s" % (url.split("/")[2], exc or type(exc).__name__))
 
 
 def yahoo_symbol(ticker):
-    return ticker.upper().replace(".", "-")
+    t = ticker.upper()
+    if t.endswith((".NS", ".BO")):
+        return t[:-3].replace(".", "-") + t[-3:]      # RELIANCE.NS stays; BRK.B -> BRK-B
+    return t.replace(".", "-")
 
 
 def cik_map(fetcher, state):
@@ -345,7 +582,8 @@ def tag(items, watch):
             if rx.search(hay):
                 touches.add(t)
         it["touches"] = sorted(touches)
-        it["tags"] = [label for label, rx in KEYWORDS if re.search(rx, hay, re.I)]
+        kw = NSE_KEYWORDS if it["id"].startswith("nse:") else KEYWORDS
+        it["tags"] = [label for label, rx in kw if re.search(rx, hay, re.I)]
         if it["kind"] == "filing" and "2.02" in it.get("items", []) and "earnings" not in it["tags"]:
             it["tags"].insert(0, "earnings")
     return items
@@ -381,18 +619,19 @@ def fingerprint(it):
 def collect(fetcher, watch, state, sec=True, forms=("8-K",), count=10, errors=None):
     errors = [] if errors is None else errors
     items = []
+    us = {t: n for t, n in watch.items() if not is_indian(t)}
     for t in sorted(watch):
         try:
             items += parse_rss(fetcher.get(YAHOO % yahoo_symbol(t), "yahoo-%s.xml" % t), t)
         except NewsError as exc:
             errors.append("headlines for %s: %s" % (t, exc))
-    if sec:
+    if sec and us:
         try:
             ciks = cik_map(fetcher, state)
         except NewsError as exc:
             errors.append("SEC ticker list: %s" % exc)
             ciks = {}
-        for t in sorted(watch):
+        for t in sorted(us):
             cik = ciks.get(t)
             if not cik:
                 if ciks:
@@ -435,11 +674,18 @@ def remember(items, state, now):
     state["last_check"] = stamp
 
 
+ZONE = {"name": "ET"}
+
+
+def local_time(d):
+    return d.astimezone(IST).replace(tzinfo=None) if ZONE["name"] == "IST" else to_eastern(d)
+
+
 def render_moves(moves, move_pct=MOVE_PCT):
     out = []
     for m in moves:
         flag = "MOVING" if abs(m["pct"]) >= move_pct else ""
-        when = (" at %s ET" % to_eastern(m["time"]).strftime("%H:%M")) if m.get("time") else ""
+        when = (" at %s %s" % (local_time(m["time"]).strftime("%H:%M"), ZONE["name"])) if m.get("time") else ""
         out.append("%-6s %s %+.2f%% vs yesterday's close %s%s  %s" % (
             m["ticker"], "{:,.2f}".format(m["price"]), m["pct"], "{:,.2f}".format(m["prev_close"]),
             when, flag))
@@ -453,7 +699,7 @@ def render(items, errors, now, moves=None, move_pct=MOVE_PCT):
     if not items:
         out.append("Nothing new.")
     for it in items:
-        when = to_eastern(it["time"]).strftime("%Y-%m-%d %H:%M ET") if it["time"] else "time unknown"
+        when = (local_time(it["time"]).strftime("%Y-%m-%d %H:%M ") + ZONE["name"]) if it["time"] else "time unknown"
         mark = "!" if it.get("important") else " "
         who = ",".join(it["touches"]) or it["ticker"]
         out.append("%s %s  %-11s %-13s %s" % (mark, when, who, it["source"], it["title"]))
@@ -465,7 +711,7 @@ def render(items, errors, now, moves=None, move_pct=MOVE_PCT):
     for e in errors:
         out.append("note: %s" % e)
     out.append("Checked %s. Headlines are leads, not facts; open the story before acting. "
-               "Not financial advice." % to_eastern(now).strftime("%Y-%m-%d %H:%M ET"))
+               "Not financial advice." % (local_time(now).strftime("%Y-%m-%d %H:%M ") + ZONE["name"]))
     return "\n".join(out) + "\n"
 
 
@@ -497,10 +743,19 @@ def main(argv=None):
     ap.add_argument("--now", help="ISO time, for reproducible runs")
     ap.add_argument("--dry-run", action="store_true", help="do not update the state file")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--market", type=str.upper, choices=["US", "IN"],
+                    help="IN: bare tickers are NSE symbols (UGROCAP means UGROCAP.NS); default from config")
+    ap.add_argument("--nse-file", action="append", metavar="FILE",
+                    help="NSE corporate-announcements JSON saved from a browser (repeatable)")
+    ap.add_argument("--no-nse-company", action="store_true",
+                    help="skip NSE's per-company page (it often refuses scripts); the RSS still runs")
     args = ap.parse_args(argv)
+    market = args.market or os.environ.get("TRADER_MARKET", "").upper() or \
+        str((load_json(args.config) or {}).get("market") or "US").upper()
 
     if args.tickers:
-        watch = {t.upper(): None for t in args.tickers}
+        watch = {(t.upper() + ".NS" if market == "IN" and not is_indian(t) and not t.startswith("^")
+                  else t.upper()): None for t in args.tickers}
         known = watch_from_files(args.portfolio, args.watchlist, args.plan)
         watch.update({t: known[t] for t in watch if known.get(t)})
     else:
@@ -510,17 +765,21 @@ def main(argv=None):
               "trader/watchlist.json).", file=sys.stderr)
         return 2
     now = parse_time(args.now) if args.now else _dt.datetime.now(_dt.timezone.utc)
+    india = sorted(t for t in watch if is_indian(t))
+    ZONE["name"] = "IST" if india and len(india) == len(watch) else "ET"
     state = load_json(args.state) or {}
     errors = []
     ua = sec_user_agent(args.user_agent, args.config)
     sec = not args.no_sec
-    if sec and not ua and not args.offline:
+    if sec and not ua and not args.offline and len(india) < len(watch):
         errors.append("SEC filings skipped: set sec_user_agent in trader/config.json or "
                       "SEC_USER_AGENT (\"Your Name you@example.com\") to include them")
         sec = False
     fetcher = Fetcher(ua, offline=args.offline)
     forms = [f.strip().upper() for f in args.forms.split(",") if f.strip()]
     items = collect(fetcher, watch, state, sec=sec, forms=forms, errors=errors)
+    if india:
+        items += collect_nse(fetcher, india, state, now, args.nse_file, not args.no_nse_company, errors)
     items = dedupe(tag(items, watch))
     shown = select(items, state, now, hours=args.hours, show_all=args.all)
     moves = [] if args.no_moves else collect_moves(fetcher, watch, errors)

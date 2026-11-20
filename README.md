@@ -198,9 +198,12 @@ replays every night in the last 60 days (in at 15:15, out at 9:30) for four simp
 and shows the opening gaps. Holding overnight is still outside the day-trade rules. Yahoo's SENSEX bars can run about 15 minutes
 late: use `--data kite` for live ones.
 
+News for Indian stocks reads NSE's corporate announcements (results, board meetings,
+fund raises, deals, ratings, resignations): `news.py --tickers UGROCAP --market IN`.
+
 Not yet for India: the budget and risk money rules (amounts are plain numbers,
-with no Indian trading costs), the news and analyst skills (SEC filings) and the
-Pelosi tracker (US Congress). Each skill's SKILL.md says what switches.
+with no Indian trading costs), the analyst skill (SEC filings) and the Pelosi
+tracker (US Congress). Each skill's SKILL.md says what switches.
 
 ## Fine print
 
