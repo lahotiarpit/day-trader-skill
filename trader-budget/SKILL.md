@@ -150,6 +150,11 @@ the fill (`ticket.py protect`). Options must be on (`"allow_options": true`, you
 it only buys. Amounts are rupees. A NIFTY lot is 65 units, so one at-the-money weekly lot is
 often ₹6,000 to ₹8,000: set `max_order_usd` to match, or every lot is refused.
 
+`"option_max_loss_per_lot": {"NIFTY": 1300, "SENSEX": 800}` gives one index its own cap, in
+rupees per lot at the stop (the name or the ticker, `^NSEI` / `^BSESN`, both work). For that
+index's options it replaces `max_loss_per_trade_usd`: a lot fits if its loss at the stop is
+under the cap, up to `max_lots`. The refusal names the stop % that would fit.
+
 ## Rules
 
 - Proposals only. This skill never calls a broker tool.

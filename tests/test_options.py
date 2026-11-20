@@ -371,5 +371,43 @@ class Sensex(Workdir):
         self.assertIn("only buys options", " ".join(r["reasons"]))
 
 
+class PerLotCaps(Workdir):
+    """option_max_loss_per_lot: a cap per lot for one index's options, in place of the
+    per-trade max loss (NIFTY 1300, SENSEX 800 on 2026-11-20)."""
+    CAPS = dict(CFG, max_loss_per_trade_usd=1000, max_lots=1, option_max_loss_per_lot={"NIFTY": 1300, "SENSEX": 800})
+
+    def test_names_and_tickers_both_work(self):
+        self.assertEqual(SIZE.lot_loss_cap(self.CAPS, "^NSEI"), 1300.0)
+        self.assertEqual(SIZE.lot_loss_cap(self.CAPS, "^BSESN"), 800.0)
+        self.assertIsNone(SIZE.lot_loss_cap(self.CAPS, "^NSEBANK"))
+        self.assertEqual(CHECK.lot_loss_cap({"option_max_loss_per_lot": {"^NSEI": 900}}, "^NSEI"), 900.0)
+
+    def plan(self, stop_pct):
+        self.index_plan("sell")
+        self.assertEqual(self.option("--stop-pct", stop_pct, "--write")[0], 0)
+        with open("trader/option_plan.json") as fh:
+            return json.load(fh)
+
+    def test_the_lot_cap_replaces_the_trade_cap(self):
+        # 13%: 952.25 a lot. 1,000 per trade would allow it too; 16%: 1,170 is over 1,000 but under 1,300
+        s = SIZE.size_option(self.plan("16"), self.CAPS, today="2026-11-18")
+        self.assertEqual((s["lots"], s["bound_by"]), (1, "max loss per lot"))
+        self.assertAlmostEqual(s["max_loss"], 1170.0)
+        s = SIZE.size_option(self.plan("30"), self.CAPS, today="2026-11-18")
+        self.assertEqual(s["lots"], 0)
+        self.assertIn("cap a lot for ^NSEI", s["refusal"])
+        self.assertIn("--stop-pct 17", s["refusal"])
+
+    def test_risk_uses_the_lot_cap(self):
+        CHECK.market.apply(vars(CHECK), "IN")
+        o = dict(ENTRY, plan=dict(ENTRY["plan"], stop=94.35), option=dict(ENTRY["option"], underlying="^NSEI"))
+        r = CHECK.check([o], self.CAPS, portfolio={"cash": 19000, "positions": []}, now=UTC_1005)["results"][0]
+        self.assertEqual(r["verdict"], "PASS", r["reasons"])          # 65 x 18.00 = 1,170: over 1,000, under 1,300
+        self.assertIn("cap $1,300 a lot", " ".join(r["info"]))         # stored text: $ (screens say \u20b9)
+        s = dict(o, option=dict(o["option"], underlying="^BSESN"))
+        r = CHECK.check([s], self.CAPS, portfolio={"cash": 19000, "positions": []}, now=UTC_1005)["results"][0]
+        self.assertIn("over your $800 cap a lot for ^BSESN", " ".join(r["reasons"]))
+
+
 if __name__ == "__main__":
     unittest.main()

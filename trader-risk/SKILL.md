@@ -191,7 +191,9 @@ An order with an `option` block (or exchange NFO / BFO) is an option. On top of 
 - whole lots, at most `max_lots` (default 2);
 - on its expiry day, no new entry after `option_expiry_switch` (13:30);
 - the max loss is (entry - stop) x units, against your per-trade and daily limits. A gap can
-  lose the whole premium: the ticket says so.
+  lose the whole premium: the ticket says so. With `option_max_loss_per_lot` set for the index
+  (for example `{"NIFTY": 1300, "SENSEX": 800}`), each lot's loss at the stop is held to that
+  cap instead of the per-trade one.
 
 Selling an option you hold (the stop, the flatten) is an exit and is never blocked.
 
